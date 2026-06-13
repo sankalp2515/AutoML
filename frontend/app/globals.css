@@ -1,0 +1,395 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   OBSIDIAN ATELIER — luxury & futuristic design system, dual-theme
+   Dark: warm obsidian · bone ivory · champagne gold
+   Light: "Ivory Atelier" — warm paper · ink · deep gold
+   All colors are RGB-triplet variables consumed by Tailwind.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── DARK (default) ── */
+  --obsidian-950: 10 9 8;
+  --obsidian-900: 14 13 11;
+  --obsidian-850: 19 17 14;
+  --obsidian-800: 25 22 19;
+  --obsidian-700: 36 31 26;
+  --obsidian-600: 51 44 36;
+
+  /* readability pass: brighter steps than v1 */
+  --bone: 238 233 222;
+  --bone-dim: 193 186 172;
+  --bone-faint: 153 146 131;
+  --bone-ghost: 110 104 92;
+
+  --gold-200: 240 222 182;
+  --gold-300: 227 201 143;
+  --gold-400: 212 182 124;
+  --gold-500: 200 169 110;
+  --gold-600: 164 133 78;
+  --gold-700: 125 101 57;
+  --gold-900: 58 47 29;
+
+  --jade-300: 143 208 192;
+  --jade-400: 116 195 178;
+  --jade-500: 95 179 161;
+  --jade-600: 71 144 127;
+  --jade-900: 29 56 51;
+
+  --terra-300: 217 162 152;
+  --terra-400: 196 117 107;
+  --terra-500: 168 93 83;
+  --terra-900: 61 33 29;
+
+  --grain-opacity: 0.035;
+  --grid-line: 238 233 222;
+  --grid-opacity: 0.025;
+
+  color-scheme: dark;
+}
+
+/* ── LIGHT — "Ivory Atelier": warm paper, ink text, deepened accents ── */
+html.light {
+  --obsidian-950: 247 244 237;   /* paper */
+  --obsidian-900: 252 250 245;   /* card surface */
+  --obsidian-850: 244 240 231;
+  --obsidian-800: 237 232 221;
+  --obsidian-700: 226 219 205;
+  --obsidian-600: 209 200 183;
+
+  --bone: 32 28 22;              /* ink */
+  --bone-dim: 79 72 61;
+  --bone-faint: 122 114 99;
+  --bone-ghost: 164 156 140;
+
+  /* gold deepened so it reads on paper */
+  --gold-200: 122 95 47;
+  --gold-300: 138 109 58;
+  --gold-400: 153 122 66;
+  --gold-500: 166 134 74;
+  --gold-600: 186 156 100;
+  --gold-700: 205 180 132;
+  --gold-900: 235 222 196;
+
+  --jade-300: 31 110 94;
+  --jade-400: 39 126 108;
+  --jade-500: 47 141 121;
+  --jade-600: 78 168 149;
+  --jade-900: 214 235 229;
+
+  --terra-300: 150 70 58;
+  --terra-400: 168 85 72;
+  --terra-500: 186 105 92;
+  --terra-900: 243 224 219;
+
+  --grain-opacity: 0.05;
+  --grid-line: 32 28 22;
+  --grid-opacity: 0.035;
+
+  color-scheme: light;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-obsidian-950 text-bone;
+    font-feature-settings: 'ss01' on, 'cv11' on;
+    transition: background-color 0.4s ease, color 0.4s ease;
+  }
+
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--gold-500) / 0.3);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--gold-500) / 0.5);
+  }
+
+  ::selection {
+    background: rgb(var(--gold-500) / 0.25);
+    color: rgb(var(--bone));
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Ambient background — organic aurora + film grain + fine technical grid
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.bg-atelier {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 70% 45% at 50% -10%, rgb(var(--gold-500) / 0.07), transparent 70%),
+    radial-gradient(ellipse 45% 35% at 85% 110%, rgb(var(--jade-500) / 0.05), transparent 70%);
+}
+
+.bg-atelier::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgb(var(--grid-line) / var(--grid-opacity)) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--grid-line) / var(--grid-opacity)) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, black 20%, transparent 80%);
+}
+
+.bg-atelier::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.aurora {
+  position: absolute;
+  width: 140%;
+  height: 60%;
+  top: -20%;
+  left: -20%;
+  background: linear-gradient(100deg,
+    transparent 20%,
+    rgb(var(--gold-500) / 0.05) 38%,
+    rgb(var(--jade-500) / 0.045) 52%,
+    rgb(var(--gold-500) / 0.035) 66%,
+    transparent 80%);
+  filter: blur(50px);
+  animation: auroraDrift 30s ease-in-out infinite alternate;
+}
+
+@keyframes auroraDrift {
+  from { transform: translateX(-6%) rotate(-1.5deg); }
+  to   { transform: translateX(6%) rotate(1.5deg); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Component vocabulary
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@layer utilities {
+  .lux-card {
+    @apply rounded-2xl border;
+    background-color: rgb(var(--obsidian-900) / 0.85);
+    background-image: linear-gradient(165deg, rgb(var(--bone) / 0.03), transparent 45%);
+    border-color: rgb(var(--bone) / 0.09);
+    box-shadow:
+      0 1px 0 rgb(var(--bone) / 0.05) inset,
+      0 24px 48px -16px rgb(0 0 0 / 0.35);
+  }
+
+  html.light .lux-card {
+    box-shadow:
+      0 1px 0 rgb(255 255 255 / 0.6) inset,
+      0 16px 40px -18px rgb(80 65 40 / 0.25);
+  }
+
+  .lux-card-gold {
+    @apply lux-card;
+    border-color: rgb(var(--gold-500) / 0.28);
+    box-shadow:
+      0 1px 0 rgb(var(--gold-200) / 0.08) inset,
+      0 24px 48px -16px rgb(0 0 0 / 0.35),
+      0 0 40px -12px rgb(var(--gold-500) / 0.18);
+  }
+
+  /* Eyebrow — small uppercase mono label. Readability pass: 10px→11px,
+     tracking 0.28em→0.22em, brighter color */
+  .eyebrow {
+    @apply font-mono text-[11px] font-medium uppercase tracking-luxe text-gold-400;
+  }
+
+  .eyebrow-dim {
+    @apply font-mono text-[11px] font-medium uppercase tracking-luxe text-bone-faint;
+  }
+
+  .hairline {
+    border-color: rgb(var(--bone) / 0.09);
+  }
+  .hairline-gold {
+    border-color: rgb(var(--gold-500) / 0.3);
+  }
+
+  .btn-gold {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gold-500 px-6 py-3 font-sans text-sm font-semibold transition-all duration-300;
+    color: rgb(var(--obsidian-950));
+  }
+  html.light .btn-gold {
+    color: rgb(252 250 245);
+  }
+  .btn-gold:hover:not(:disabled) {
+    @apply bg-gold-400;
+    box-shadow: 0 0 32px -6px rgb(var(--gold-500) / 0.55);
+    transform: translateY(-1px);
+  }
+  .btn-gold:active:not(:disabled) {
+    transform: translateY(0) scale(0.99);
+  }
+  .btn-gold:disabled {
+    @apply bg-obsidian-700 text-bone-ghost cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border px-5 py-2.5 font-sans text-sm text-bone-dim transition-all duration-300;
+    border-color: rgb(var(--bone) / 0.15);
+  }
+  .btn-ghost:hover {
+    @apply text-bone;
+    border-color: rgb(var(--gold-500) / 0.45);
+  }
+
+  .gold-rule {
+    position: relative;
+  }
+  .gold-rule::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: -10px;
+    width: 56px;
+    height: 1px;
+    background: linear-gradient(90deg, rgb(var(--gold-500)), transparent);
+  }
+
+  .corner-ticks {
+    position: relative;
+  }
+  .corner-ticks::before,
+  .corner-ticks::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border-color: rgb(var(--gold-500) / 0.5);
+    border-style: solid;
+  }
+  .corner-ticks::before {
+    top: -1px;
+    left: -1px;
+    border-width: 1px 0 0 1px;
+    border-top-left-radius: 4px;
+  }
+  .corner-ticks::after {
+    bottom: -1px;
+    right: -1px;
+    border-width: 0 1px 1px 0;
+    border-bottom-right-radius: 4px;
+  }
+
+  .hover-lift {
+    @apply transition-all duration-300;
+  }
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    border-color: rgb(var(--gold-500) / 0.35);
+    box-shadow: 0 20px 48px -16px rgb(0 0 0 / 0.45), 0 0 32px -12px rgb(var(--gold-500) / 0.15);
+  }
+
+  .text-gold-shimmer {
+    background: linear-gradient(110deg,
+      rgb(var(--gold-500)) 20%,
+      rgb(var(--gold-200)) 40%,
+      rgb(var(--gold-500)) 60%);
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: goldShimmer 7s linear infinite;
+  }
+}
+
+@keyframes goldShimmer {
+  to { background-position: 200% center; }
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-up {
+  animation: fadeSlideUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.85); }
+}
+.animate-breathe {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Notebook viewer — editorial markdown + warm code cells
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.tok-keyword { color: rgb(var(--gold-400)); }
+.tok-string  { color: rgb(var(--jade-400)); }
+.tok-comment { color: rgb(var(--bone-faint)); font-style: italic; }
+.tok-number  { color: rgb(var(--terra-300)); }
+
+.nb-markdown h1 {
+  @apply font-display text-3xl text-bone mt-6 mb-3 tracking-tight font-semibold;
+}
+.nb-markdown h2 {
+  @apply font-display text-xl text-gold-300 mt-9 mb-3 pb-2.5 border-b font-semibold;
+  border-color: rgb(var(--gold-500) / 0.18);
+}
+.nb-markdown h3 {
+  @apply font-display text-lg text-bone mt-5 mb-2 font-medium;
+}
+/* readability: 13.5px→14.5px, brighter body text */
+.nb-markdown p {
+  @apply text-[14.5px] text-bone-dim leading-[1.8] my-2.5;
+}
+.nb-markdown strong { @apply text-bone font-semibold; }
+.nb-markdown em { @apply text-bone-dim; }
+.nb-markdown ul, .nb-markdown ol { @apply my-2.5 pl-5 space-y-1.5; }
+.nb-markdown ul { @apply list-disc; }
+.nb-markdown ol { @apply list-decimal; }
+.nb-markdown li { @apply text-[14.5px] text-bone-dim leading-relaxed; }
+.nb-markdown li::marker { @apply text-gold-500; }
+.nb-markdown code {
+  @apply font-mono text-[12.5px] text-gold-300 rounded px-1.5 py-0.5;
+  background: rgb(var(--gold-500) / 0.1);
+}
+.nb-markdown pre {
+  @apply border rounded-xl p-4 overflow-x-auto my-3 bg-obsidian-900;
+  border-color: rgb(var(--bone) / 0.08);
+}
+.nb-markdown pre code { @apply bg-transparent p-0 text-bone-dim; }
+.nb-markdown table { @apply w-full my-3 text-[13px]; }
+.nb-markdown th {
+  @apply text-left text-gold-400 font-mono text-[11px] uppercase tracking-wider border-b px-3 py-2 font-medium;
+  border-color: rgb(var(--gold-500) / 0.22);
+}
+.nb-markdown td {
+  @apply text-bone-dim border-b px-3 py-2;
+  border-color: rgb(var(--bone) / 0.06);
+}
+.nb-markdown hr {
+  @apply my-7 border-0 h-px;
+  background: linear-gradient(90deg, rgb(var(--gold-500) / 0.35), transparent);
+}
+.nb-markdown blockquote {
+  @apply border-l pl-4 my-3 text-bone-faint italic;
+  border-color: rgb(var(--gold-500) / 0.45);
+}
+.nb-markdown a { @apply text-gold-400 underline hover:text-gold-300; }
+
+.nb-scroll { scrollbar-gutter: stable; }

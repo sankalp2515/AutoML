@@ -1,0 +1,91 @@
+{
+  "title": "AutoML Orchestrator",
+  "uid": "automl-main",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Pipelines Today",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(automl_pipeline_runs_total[24h]))", "legendFormat": "runs"}],
+      "options": {"colorMode": "background", "graphMode": "area"}
+    },
+    {
+      "id": 2, "type": "stat", "title": "Success Rate (24h)",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(automl_pipeline_runs_total{status='completed'}[24h])) / sum(increase(automl_pipeline_runs_total{status=~'completed|failed'}[24h])) * 100", "legendFormat": "%"}],
+      "options": {"colorMode": "background", "thresholds": {"steps": [{"value": 0, "color": "red"}, {"value": 70, "color": "yellow"}, {"value": 90, "color": "green"}]}}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Active Pipelines",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "automl_active_pipelines", "legendFormat": "active"}],
+      "options": {"colorMode": "background"}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Total LLM Tokens (24h)",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(automl_llm_tokens_total[24h]))", "legendFormat": "tokens"}],
+      "options": {"colorMode": "value"}
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Pipeline Duration (p50 / p95)",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(automl_pipeline_duration_seconds_bucket[10m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, rate(automl_pipeline_duration_seconds_bucket[10m]))", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Agent Duration by Agent",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by(agent_name, le)(rate(automl_agent_duration_seconds_bucket[10m])))", "legendFormat": "{{agent_name}}"}
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "LLM Latency p95 by Agent",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by(agent_name, le)(rate(automl_llm_latency_seconds_bucket[10m])))", "legendFormat": "{{agent_name}}"}
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "LLM Tokens/min by Direction",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum by(direction)(rate(automl_llm_tokens_total[5m])) * 60", "legendFormat": "{{direction}}"}
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Pipeline Runs / min",
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 6},
+      "targets": [
+        {"expr": "sum by(status)(rate(automl_pipeline_runs_total[5m])) * 60", "legendFormat": "{{status}}"}
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Sandbox Executions / min",
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 6},
+      "targets": [
+        {"expr": "sum by(status)(rate(automl_sandbox_executions_total[5m])) * 60", "legendFormat": "{{status}}"}
+      ]
+    },
+    {
+      "id": 11, "type": "histogram", "title": "Final Model Score Distribution",
+      "gridPos": {"x": 0, "y": 26, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "automl_pipeline_final_score_bucket", "legendFormat": "{{le}}"}
+      ]
+    },
+    {
+      "id": 12, "type": "histogram", "title": "Score Improvement (final - baseline)",
+      "gridPos": {"x": 12, "y": 26, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "automl_model_score_improvement_bucket", "legendFormat": "{{le}}"}
+      ]
+    }
+  ]
+}
