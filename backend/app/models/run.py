@@ -16,6 +16,9 @@ class Run(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     status: Mapped[str] = mapped_column(String(20), default="queued")
+    # Multi-tenancy (Phase 4). "public" in single-tenant mode. Indexed for
+    # per-tenant listing/quota. Child tables authorize via their run's tenant_id.
+    tenant_id: Mapped[str] = mapped_column(String(64), default="public", index=True)
 
     # User inputs
     dataset_filename: Mapped[str] = mapped_column(String(255))
@@ -24,6 +27,8 @@ class Run(Base):
     exclude_columns: Mapped[list] = mapped_column(JSON, default=list)
     fp_fn_preference: Mapped[str | None] = mapped_column(Text, nullable=True)
     interpretability_required: Mapped[bool] = mapped_column(default=False)
+    # "tabular" (default) | "timeseries" — which pipeline/studio runs this dataset
+    pipeline: Mapped[str] = mapped_column(String(20), default="tabular")
 
     # Detected / computed
     task_type: Mapped[str | None] = mapped_column(String(50), nullable=True)

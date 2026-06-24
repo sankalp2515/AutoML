@@ -3,31 +3,35 @@ from typing import Any
 
 from app.agents.base_agent import BaseAgent
 from app.core.state import AgentState
+from app.core import model_registry as registry
 
-SYSTEM_PROMPT = """You are an expert ML model selector.
-Given the data characteristics, select 2-3 model candidates (NOT exhaustive search).
+# The candidate menu is RETRIEVED from app/core/model_registry.py (the source) and
+# injected per-run into the user message — not hardcoded here. Add a model = add a
+# registry entry; the scout below picks from whatever is registered + installed.
+SYSTEM_PROMPT = """You are an expert ML model scout.
+From the AVAILABLE MODELS list provided in the user message, select 2-3 candidates
+best suited to the data (NOT an exhaustive search). Use ONLY the exact class strings
+from that list — never invent a class.
 
-Available models (use ONLY these exact class strings):
-  Classification: "xgb.XGBClassifier", "RandomForestClassifier", "GradientBoostingClassifier", "LogisticRegression"
-  Regression:     "xgb.XGBRegressor",  "RandomForestRegressor",  "GradientBoostingRegressor",  "Ridge"
+General heuristics:
+- n_samples < 5000: prefer linear (LogisticRegression / Ridge) or HistGradientBoosting
+- n_samples > 5000 / wide data: prefer XGBoost or HistGradientBoosting
+- interpretability required: linear models only
+- high class imbalance: prefer models marked [class_weight]
+- multilabel: any classifier works (wrapped in MultiOutputClassifier automatically);
+  MultiOutputClassifier(LogisticRegression) is a strong baseline
+- include at least one boosting model unless interpretability is required
 
-Heuristics:
-- n_samples < 5000: prefer LogisticRegression or Ridge
-- n_samples > 5000: prefer xgb.XGBClassifier / xgb.XGBRegressor
-- interpretability required: LogisticRegression or Ridge only
-- high class imbalance: use class_weight="balanced" (LogReg, RF, GB only — not XGB)
-- Always include XGBoost as one candidate unless interpretability is required
+If a RECOMMENDED (not-installed) model would clearly suit this data better, name it in
+"discovery_notes" with its pip package — but DO NOT select it (it cannot train until installed).
 
 Respond with JSON:
 {
   "selected_models": [
-    {
-      "name": "XGBoost",
-      "class": "xgb.XGBClassifier",
-      "reason": "<why selected>",
-      "initial_params": {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 6}
-    }
+    {"name": "...", "class": "<exact class string from the list>",
+     "reason": "<why>", "initial_params": {"...": "..."}}
   ],
+  "discovery_notes": "<optional: a not-installed model worth adding, with pip package>",
   "decisions": [{"decision": "...", "reasoning": "..."}]
 }
 """
@@ -44,18 +48,50 @@ warnings.filterwarnings("ignore")
 
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 from sklearn.linear_model import LogisticRegression, Ridge, Lasso
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.ensemble import (RandomForestClassifier, RandomForestRegressor,
+                              GradientBoostingClassifier, GradientBoostingRegressor,
+                              HistGradientBoostingClassifier, HistGradientBoostingRegressor)
 from sklearn.svm import SVC
+from sklearn.multioutput import MultiOutputClassifier
 import xgboost as xgb
 
 enriched_path = "{enriched_path}"
 df = pd.read_csv(enriched_path)
-y = df["__target__"].values
+
+# For multilabel, target is stored as JSON strings; parse them
+task_type = "{task_type}"
+if task_type == "multilabel_classification":
+    import ast
+    y_raw = df["__target__"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    y = np.array(y_raw.tolist())
+else:
+    y = df["__target__"].values
 X = df.drop(columns=["__target__"])
 
-task_type = "{task_type}"
 primary_metric = "{primary_metric}"
 class_imbalance = {class_imbalance}
+label_columns = {label_columns}
+label_delimiter = "{label_delimiter}"
+imbalance_strategy = "{imbalance_strategy}"
+
+
+def _cv_estimator(model):
+    # In-fold SMOTE/SMOTE-Tomek for single-label classification: resampling happens
+    # ONLY on each training fold (imblearn Pipeline), never the validation fold — no leakage.
+    if (task_type in ("binary_classification", "multiclass_classification")
+            and imbalance_strategy in ("smote", "smote_tomek")):
+        try:
+            from imblearn.over_sampling import SMOTE
+            from imblearn.combine import SMOTETomek
+            from imblearn.pipeline import Pipeline as ImbPipeline
+            minority = int(pd.Series(y).value_counts().min())
+            if minority >= 6:
+                rs = (SMOTE(k_neighbors=min(5, minority - 1), random_state=42)
+                      if imbalance_strategy == "smote" else SMOTETomek(random_state=42))
+                return ImbPipeline([("resample", rs), ("model", model)])
+        except Exception:
+            pass
+    return model
 
 scoring_map = {{
     "auc_roc": "roc_auc",
@@ -66,6 +102,11 @@ scoring_map = {{
     "rmse": "neg_root_mean_squared_error",
     "mae": "neg_mean_absolute_error",
     "r2": "r2",
+    "pr_auc": "average_precision",
+    "f1_micro": "f1_micro",
+    "f1_macro": "f1_macro",
+    "f1_samples": "f1_samples",
+    "hamming_loss": "hamming_loss",
 }}
 scoring = scoring_map.get(primary_metric, "roc_auc" if task_type != "regression" else "neg_root_mean_squared_error")
 
@@ -77,9 +118,10 @@ if task_type == "multiclass_classification":
         "recall": "recall_weighted",
         "precision": "precision_weighted",
         "f1": "f1_weighted",
+        "average_precision": "average_precision",  # PR-AUC not defined for multiclass in sklearn
     }}.get(scoring, scoring)
 
-if task_type != "regression":
+if task_type != "regression" and task_type != "multilabel_classification":
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 else:
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -97,8 +139,8 @@ for config in models_config:
     name = config["name"]
     params = config.get("initial_params", {{}})
 
-    # Add class_weight for imbalanced classification
-    if task_type != "regression" and class_imbalance:
+    # Add class_weight for imbalanced classification (not for multilabel)
+    if task_type != "regression" and task_type != "multilabel_classification" and class_imbalance:
         if "class_weight" in __import__("inspect").signature(
             eval(config["class"])
         ).parameters:
@@ -110,9 +152,16 @@ for config in models_config:
         params["tree_method"] = "hist"
 
     try:
-        model = eval(config["class"])(**params)
+        base_model = eval(config["class"])(**params)
+        
+        # Wrap in MultiOutputClassifier for multilabel
+        if task_type == "multilabel_classification":
+            model = MultiOutputClassifier(base_model, n_jobs=1)
+        else:
+            model = base_model
+            
         t0 = time.time()
-        scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=1)
+        scores = cross_val_score(_cv_estimator(model), X, y, cv=cv, scoring=scoring, n_jobs=1)
         elapsed = time.time() - t0
 
         if task_type == "regression" and scoring.startswith("neg_"):
@@ -151,9 +200,14 @@ else:
 # Train winner on full data and save
 winner_config = next(c for c in models_config if c["name"] == winner)
 winner_params = valid[winner]["params"]
-if task_type != "regression" and class_imbalance:
+if task_type != "regression" and task_type != "multilabel_classification" and class_imbalance:
     winner_params["class_weight"] = "balanced"
-winner_model = eval(winner_config["class"])(**winner_params)
+
+base_model = eval(winner_config["class"])(**winner_params)
+if task_type == "multilabel_classification":
+    winner_model = MultiOutputClassifier(base_model, n_jobs=1)
+else:
+    winner_model = base_model
 winner_model.fit(X, y)
 
 os.makedirs(artifacts_dir, exist_ok=True)
@@ -184,9 +238,18 @@ class ModelSelectorAgent(BaseAgent):
         eda = state.get("eda_insights", {})
         n_samples = audit.get("shape", [0])[0]
         class_imbalance = eda.get("class_imbalance", {})
+        task_type = state["task_type"]
+
+        # RETRIEVE the candidate menu from the registry (the source) for this task.
+        menu = registry.menu_text(task_type)
+        recs = registry.recommendations_text(task_type)
+        allowed_classes = {
+            registry.class_for(s, task_type)
+            for s in registry.catalog_for(task_type, installed_only=True)
+        }
 
         user_message = f"""
-Task: {state['task_type']}
+Task: {task_type}
 Primary metric: {state['primary_metric']}
 n_samples: {n_samples}
 n_features (after preprocessing): {audit.get('shape', [0, 0])[1]}
@@ -194,15 +257,29 @@ Class imbalance: {json.dumps(class_imbalance)}
 Interpretability required: {state.get('interpretability_required', False)}
 Current baseline score: {state.get('current_score')} ({state.get('primary_metric')})
 
+AVAILABLE MODELS (choose 2-3; use the exact class string):
+{menu}
+{("RECOMMENDED (not installed — advisory only, do NOT select):" + chr(10) + recs) if recs else ""}
+
 Select 2-3 model candidates with initial parameters.
 """
         response = await self.llm.complete_json(SYSTEM_PROMPT, user_message)
         selected_models = response.get("selected_models", [])
 
+        # Validate against the registry — drop any class the LLM invented (eval-safety),
+        # and fall back to the registry's default candidates if nothing valid remains.
+        selected_models = [m for m in selected_models if m.get("class") in allowed_classes]
         if not selected_models:
-            default = {"name": "XGBoost", "class": "xgb.XGBClassifier",
-                       "reason": "default", "initial_params": {"n_estimators": 100}}
-            selected_models = [default]
+            fallback = registry.catalog_for(task_type, installed_only=True)[:2]
+            selected_models = [
+                {"name": s["name"], "class": registry.class_for(s, task_type),
+                 "reason": "registry default", "initial_params": {}}
+                for s in fallback
+            ]
+
+        discovery_notes = response.get("discovery_notes", "")
+        if discovery_notes:
+            await self.emit(run_id, f"Scout note: {discovery_notes[:160]}", {"discovery": True})
 
         def render(p: dict) -> str:
             return TRAINING_CODE_TEMPLATE.format(
@@ -211,6 +288,9 @@ Select 2-3 model candidates with initial parameters.
                 primary_metric=state["primary_metric"],
                 class_imbalance=repr(bool(class_imbalance and class_imbalance.get("imbalanced"))),
                 models_config=repr(p["models_config"]),
+                label_columns=repr(state.get("label_columns", [])),
+                label_delimiter=state.get("label_delimiter", ""),
+                imbalance_strategy=state.get("imbalance_strategy", "none"),
             )
 
         result = await self.execute_code_with_repair(
@@ -225,6 +305,19 @@ Select 2-3 model candidates with initial parameters.
             ),
             timeout=600,
         )
+        if not result["success"]:
+            # Tier-1 (param revision) exhausted → let the agent WRITE its own fix.
+            result = await self.try_agentic_repair(
+                run_id, render({"models_config": selected_models}), result,
+                task_type=state.get("task_type", "unknown"),
+                result_keys=["winner", "winner_score", "models_results", "winner_path", "winner_class"],
+                goal=("From enriched.csv (has a '__target__' column), train & cross-validate the "
+                      "candidate models, pick the best by CV score, save it to "
+                      "artifacts_dir/winner_model.pkl. Set RESULT with winner (str), winner_score "
+                      "(float), models_results ({name: {cv_score, cv_std, training_time_s}}), "
+                      "winner_path (str), winner_class (str)."),
+                timeout=600,
+            )
         if not result["success"]:
             await self._mark_step(run_id, "failed", result["error"])
             return {"error": f"Model training failed: {result['error']}", "status": "failed"}

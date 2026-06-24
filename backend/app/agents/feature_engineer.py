@@ -45,17 +45,67 @@ warnings.filterwarnings("ignore")
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+from sklearn.multioutput import MultiOutputClassifier
 
 # Load processed data
 processed_path = "{processed_path}"
 df = pd.read_csv(processed_path)
-y = df["__target__"].values
+target_col = "{target_column}"
+task_type = "{task_type}"
+primary_metric = "{primary_metric}"
+imbalance_strategy = "{imbalance_strategy}"
+
+
+def _cv_estimator(model):
+    # In-fold SMOTE/SMOTE-Tomek for single-label classification lift measurement.
+    if (task_type in ("binary_classification", "multiclass_classification")
+            and imbalance_strategy in ("smote", "smote_tomek")):
+        try:
+            from imblearn.over_sampling import SMOTE
+            from imblearn.combine import SMOTETomek
+            from imblearn.pipeline import Pipeline as ImbPipeline
+            minority = int(pd.Series(y).value_counts().min())
+            if minority >= 6:
+                rs = (SMOTE(k_neighbors=min(5, minority - 1), random_state=42)
+                      if imbalance_strategy == "smote" else SMOTETomek(random_state=42))
+                return ImbPipeline([("resample", rs), ("model", model)])
+        except Exception:
+            pass
+    return model
+
+# Multilabel targets are stored as JSON lists — parse to a 2-D label matrix
+# (mirror of the parse block in model_selector/tuner/evaluator).
+if task_type == "multilabel_classification":
+    import ast
+    y_raw = df["__target__"].apply(lambda v: ast.literal_eval(v) if isinstance(v, str) else v)
+    y = np.array(y_raw.tolist())
+else:
+    y = df["__target__"].values
 X_base = df.drop(columns=["__target__"])
 
 # Also load raw CSV for original columns (for feature engineering)
 df_raw = pd.read_csv(dataset_path)
-target_col = "{target_column}"
-task_type = "{task_type}"
+
+# Scoring map mirrors other agents — remap to sklearn names
+scoring_map = {{
+    "auc_roc": "roc_auc", "recall": "recall", "precision": "precision",
+    "f1": "f1", "accuracy": "accuracy", "rmse": "neg_root_mean_squared_error",
+    "mae": "neg_mean_absolute_error", "r2": "r2", "pr_auc": "average_precision",
+    "f1_micro": "f1_micro", "f1_macro": "f1_macro", "f1_samples": "f1_samples",
+    "hamming_loss": "hamming_loss",
+}}
+cv_scoring = scoring_map.get(primary_metric,
+    "roc_auc" if task_type != "regression" else "neg_root_mean_squared_error")
+
+# Binary-only scorers produce NaN on multiclass — remap to weighted variants
+if task_type == "multiclass_classification":
+    cv_scoring = {{
+        "roc_auc": "roc_auc_ovr_weighted",
+        "recall": "recall_weighted",
+        "precision": "precision_weighted",
+        "f1": "f1_weighted",
+        "average_precision": "average_precision",  # PR-AUC not defined for multiclass in sklearn
+    }}.get(cv_scoring, cv_scoring)
 
 results = []
 proposed = {proposed_features}
@@ -96,12 +146,21 @@ for feat in proposed:
             base_score = float(-cross_val_score(model, X_base, y, cv=cv, scoring=scoring).mean())
             aug_score = float(-cross_val_score(model, X_aug, y, cv=cv, scoring=scoring).mean())
             lift = base_score - aug_score  # lower RMSE is better
+        elif task_type == "multilabel_classification":
+            # Multilabel: KFold (Stratified unsupported for 2-D y), MultiOutputClassifier,
+            # and a multilabel-safe scorer (f1_samples) regardless of primary_metric.
+            cv = KFold(n_splits=3, shuffle=True, random_state=42)
+            model = MultiOutputClassifier(LogisticRegression(max_iter=500, random_state=42), n_jobs=1)
+            scoring = cv_scoring if cv_scoring in ("f1_micro", "f1_macro", "f1_samples", "hamming_loss") else "f1_samples"
+            base_score = float(cross_val_score(model, X_base, y, cv=cv, scoring=scoring).mean())
+            aug_score = float(cross_val_score(model, X_aug, y, cv=cv, scoring=scoring).mean())
+            lift = aug_score - base_score
         else:
             cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
             model = LogisticRegression(max_iter=500, random_state=42)
-            scoring = "roc_auc" if task_type == "binary_classification" else "f1_weighted"
-            base_score = float(cross_val_score(model, X_base, y, cv=cv, scoring=scoring).mean())
-            aug_score = float(cross_val_score(model, X_aug, y, cv=cv, scoring=scoring).mean())
+            scoring = cv_scoring
+            base_score = float(cross_val_score(_cv_estimator(model), X_base, y, cv=cv, scoring=scoring).mean())
+            aug_score = float(cross_val_score(_cv_estimator(model), X_aug, y, cv=cv, scoring=scoring).mean())
             lift = aug_score - base_score
 
         kept = lift > 0.002  # keep only if meaningful lift
@@ -214,13 +273,28 @@ Propose new features with business hypotheses.
             processed_path=state.get("processed_data_path", ""),
             target_column=state["target_column"],
             task_type=state["task_type"],
+            primary_metric=state.get("primary_metric", "auc_roc"),
             proposed_features=repr(proposed),
+            imbalance_strategy=state.get("imbalance_strategy", "none"),
         )
 
         result = await self.execute_code(code, run_id, timeout=300)
         if not result["success"]:
-            await self._mark_step(run_id, "failed", result["error"])
-            return {"error": f"Feature engineering failed: {result['error']}", "status": "failed"}
+            # E3: agent writes its own fix when the template fails.
+            agentic = await self.execute_code_agentic(
+                run_id, code, result["error"], agent_role="feature_engineer",
+                task_type=state.get("task_type", "unknown"),
+                tags=["feature_engineer"] + (["multilabel"] if state.get("task_type") == "multilabel_classification" else []),
+                goal=("From processed_path (a CSV with a '__target__' column), engineer numeric "
+                      "features, keep those that improve CV score, and write enriched.csv."),
+                result_keys=["features_evaluated", "features_kept", "features_dropped",
+                             "enriched_path", "n_features_total"],
+                timeout=300,
+            )
+            if not agentic["success"]:
+                await self._mark_step(run_id, "failed", agentic["error"])
+                return {"error": f"Feature engineering failed: {agentic['error']}", "status": "failed"}
+            result = agentic
 
         data = result["result"]
         kept = data.get("features_kept", [])

@@ -2,6 +2,7 @@ from typing import Any
 
 from app.agents.base_agent import BaseAgent
 from app.core.state import AgentState
+from app.core import model_registry as registry
 
 TUNING_CODE_TEMPLATE = '''
 import pandas as pd
@@ -14,40 +15,78 @@ warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+from sklearn.multioutput import MultiOutputClassifier
 import xgboost as xgb
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.ensemble import (RandomForestClassifier, RandomForestRegressor,
-                               GradientBoostingClassifier, GradientBoostingRegressor)
+                               GradientBoostingClassifier, GradientBoostingRegressor,
+                               HistGradientBoostingClassifier, HistGradientBoostingRegressor)
 
-enriched_path = "{enriched_path}"
+enriched_path = __ENRICHED_PATH__
 df = pd.read_csv(enriched_path)
-y = df["__target__"].values
+
+task_type = __TASK_TYPE__
+primary_metric = __PRIMARY_METRIC__
+winner_class = __WINNER_CLASS__
+n_trials = __N_TRIALS__
+imbalance_strategy = __IMBALANCE_STRATEGY__
+
+
+def _make_resampler():
+    # Reconstruct the in-fold resampler for SMOTE/SMOTE-Tomek (single-label only).
+    if (task_type in ("binary_classification", "multiclass_classification")
+            and imbalance_strategy in ("smote", "smote_tomek")):
+        try:
+            from imblearn.over_sampling import SMOTE
+            from imblearn.combine import SMOTETomek
+            import pandas as _pd
+            minority = int(_pd.Series(y).value_counts().min())
+            if minority >= 6:
+                return (SMOTE(k_neighbors=min(5, minority - 1), random_state=42)
+                        if imbalance_strategy == "smote" else SMOTETomek(random_state=42))
+        except Exception:
+            pass
+    return None
+
+
+def _cv_estimator(model):
+    rs = _make_resampler()
+    if rs is not None:
+        from imblearn.pipeline import Pipeline as ImbPipeline
+        return ImbPipeline([("resample", rs), ("model", model)])
+    return model
+
+# Parse multilabel target (stored as JSON strings in enriched.csv)
+if task_type == "multilabel_classification":
+    import ast
+    y_raw = df["__target__"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    y = np.array(y_raw.tolist())
+else:
+    y = df["__target__"].values
 X = df.drop(columns=["__target__"])
 
-task_type = "{task_type}"
-primary_metric = "{primary_metric}"
-winner_class = "{winner_class}"
-n_trials = {n_trials}
-
-scoring_map = {{
+scoring_map = {
     "auc_roc": "roc_auc", "recall": "recall", "precision": "precision",
     "f1": "f1", "accuracy": "accuracy", "rmse": "neg_root_mean_squared_error",
-    "mae": "neg_mean_absolute_error", "r2": "r2",
-}}
+    "mae": "neg_mean_absolute_error", "r2": "r2", "pr_auc": "average_precision",
+    "f1_micro": "f1_micro", "f1_macro": "f1_macro", "f1_samples": "f1_samples",
+    "hamming_loss": "hamming_loss",
+}
 scoring = scoring_map.get(primary_metric, "roc_auc")
 
 # Binary-only scorers produce NaN on multiclass — remap to weighted variants
 if task_type == "multiclass_classification":
-    scoring = {{
+    scoring = {
         "roc_auc": "roc_auc_ovr_weighted",
         "recall": "recall_weighted",
         "precision": "precision_weighted",
         "f1": "f1_weighted",
-    }}.get(scoring, scoring)
+        "average_precision": "average_precision",  # PR-AUC not defined for multiclass in sklearn
+    }.get(scoring, scoring)
 
 higher_is_better = not scoring.startswith("neg_")
 
-if task_type != "regression":
+if task_type != "regression" and task_type != "multilabel_classification":
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 else:
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -55,66 +94,52 @@ else:
 # GPU detection — XGBoost trials run on CUDA when the GPU is reserved
 import shutil as _shutil
 GPU_AVAILABLE = _shutil.which("nvidia-smi") is not None
-_xgb_device = {{"device": "cuda", "tree_method": "hist"}} if GPU_AVAILABLE else {{}}
+_xgb_device = {"device": "cuda", "tree_method": "hist"} if GPU_AVAILABLE else {}
+
+
+# Search space comes from the model registry (the source) — NOT hardcoded here.
+search_space = __SEARCH_SPACE__
+
+
+def _suggest(trial):
+    """Build a params dict generically from the registry-supplied search space."""
+    p = {}
+    for name, spec in search_space.items():
+        t = spec["type"]
+        if t == "int":
+            p[name] = trial.suggest_int(name, spec["low"], spec["high"])
+        elif t == "float":
+            p[name] = trial.suggest_float(name, spec["low"], spec["high"], log=spec.get("log", False))
+        elif t == "categorical":
+            p[name] = trial.suggest_categorical(name, spec["choices"])
+    return p
+
+
+def _build(params):
+    """Instantiate the concrete winner class with tuned params + fixed per-family kwargs."""
+    reg = task_type == "regression"
+    if "XGB" in winner_class:
+        base = (xgb.XGBRegressor if reg else xgb.XGBClassifier)(**params, **_xgb_device, random_state=42, verbosity=0)
+    elif "HistGradientBoosting" in winner_class:
+        base = (HistGradientBoostingRegressor if reg else HistGradientBoostingClassifier)(**params, random_state=42)
+    elif "GradientBoosting" in winner_class:
+        base = (GradientBoostingRegressor if reg else GradientBoostingClassifier)(**params, random_state=42)
+    elif "RandomForest" in winner_class:
+        base = (RandomForestRegressor if reg else RandomForestClassifier)(**params, random_state=42, n_jobs=1)
+    elif "LogisticRegression" in winner_class:
+        base = LogisticRegression(**params, solver="liblinear", max_iter=1000, random_state=42)
+    elif "Ridge" in winner_class:
+        base = Ridge(**params)
+    else:
+        base = joblib.load(__WINNER_PATH__)
+    return MultiOutputClassifier(base, n_jobs=1) if task_type == "multilabel_classification" else base
 
 
 def objective(trial):
-    if "XGB" in winner_class:
-        params = {{
-            "n_estimators": trial.suggest_int("n_estimators", 100, 500),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-        }}
-        if task_type == "regression":
-            model = xgb.XGBRegressor(**params, **_xgb_device, random_state=42, verbosity=0)
-        else:
-            model = xgb.XGBClassifier(**params, **_xgb_device, random_state=42, verbosity=0)
-
-    elif "GradientBoosting" in winner_class:
-        params = {{
-            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "max_depth": trial.suggest_int("max_depth", 2, 8),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        }}
-        if task_type == "regression":
-            model = GradientBoostingRegressor(**params, random_state=42)
-        else:
-            model = GradientBoostingClassifier(**params, random_state=42)
-
-    elif "RandomForest" in winner_class:
-        params = {{
-            "n_estimators": trial.suggest_int("n_estimators", 50, 400),
-            "max_depth": trial.suggest_int("max_depth", 3, 20),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
-        }}
-        if task_type == "regression":
-            model = RandomForestRegressor(**params, random_state=42, n_jobs=1)
-        else:
-            model = RandomForestClassifier(**params, random_state=42, n_jobs=1,
-                                            class_weight="balanced")
-
-    elif "LogisticRegression" in winner_class:
-        params = {{
-            "C": trial.suggest_float("C", 1e-4, 100, log=True),
-            "penalty": trial.suggest_categorical("penalty", ["l1", "l2"]),
-            "solver": "liblinear",
-        }}
-        model = LogisticRegression(**params, max_iter=1000, random_state=42)
-
-    elif "Ridge" in winner_class:
-        params = {{"alpha": trial.suggest_float("alpha", 1e-4, 100, log=True)}}
-        model = Ridge(**params)
-
-    else:
+    if not search_space:
         return 0.0
-
-    scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=1)
+    model = _build(_suggest(trial))
+    scores = cross_val_score(_cv_estimator(model), X, y, cv=cv, scoring=scoring, n_jobs=1)
     return float(scores.mean()) if higher_is_better else float(-scores.mean())
 
 
@@ -129,39 +154,29 @@ best_value = study.best_value
 if not higher_is_better:
     best_value = -best_value
 
-# Re-train tuned model on full data
-if "XGB" in winner_class:
-    if task_type == "regression":
-        tuned_model = xgb.XGBRegressor(**best_params, **_xgb_device, random_state=42, verbosity=0)
-    else:
-        tuned_model = xgb.XGBClassifier(**best_params, **_xgb_device, random_state=42, verbosity=0)
-elif "GradientBoosting" in winner_class:
-    if task_type == "regression":
-        tuned_model = GradientBoostingRegressor(**best_params, random_state=42)
-    else:
-        tuned_model = GradientBoostingClassifier(**best_params, random_state=42)
-elif "RandomForest" in winner_class:
-    if task_type == "regression":
-        tuned_model = RandomForestRegressor(**best_params, random_state=42)
-    else:
-        tuned_model = RandomForestClassifier(**best_params, random_state=42)
-elif "Ridge" in winner_class:
-    tuned_model = Ridge(**best_params)
-else:
-    tuned_model = joblib.load("{winner_path}")
+# Re-train tuned model on full data — same generic builder used in the objective
+# (_build already wraps multilabel in MultiOutputClassifier).
+tuned_model = _build(best_params)
 
-tuned_model.fit(X, y)
+# Final fit: when SMOTE is active, train the deployed model on resampled FULL data
+# so it learned from a balanced set. The inference pipeline still has NO resampler.
+_final_rs = _make_resampler()
+if _final_rs is not None:
+    X_fit, y_fit = _final_rs.fit_resample(X, y)
+    tuned_model.fit(X_fit, y_fit)
+else:
+    tuned_model.fit(X, y)
 
 os.makedirs(artifacts_dir, exist_ok=True)
 tuned_path = os.path.join(artifacts_dir, "tuned_model.pkl")
 joblib.dump(tuned_model, tuned_path)
 
-RESULT = {{
+RESULT = {
     "best_params": best_params,
     "tuned_score": best_value,
     "n_trials_completed": len(study.trials),
     "tuned_path": tuned_path,
-}}
+}
 '''
 
 
@@ -178,16 +193,32 @@ class TunerAgent(BaseAgent):
         n_samples = state.get("data_audit", {}).get("shape", [0])[0]
         n_trials = 30 if n_samples < 50000 else 20
 
-        code = TUNING_CODE_TEMPLATE.format(
-            enriched_path=state.get("enriched_data_path", ""),
-            task_type=state["task_type"],
-            primary_metric=state["primary_metric"],
-            winner_class=state.get("winner_model_class", "xgb.XGBClassifier"),
-            winner_path=state.get("winner_model_path", ""),
-            n_trials=n_trials,
+        # Token replacement (NOT .format) — this template is dict/f-string heavy,
+        # so it uses natural single braces; values are injected via repr() like exporter.
+        code = (
+            TUNING_CODE_TEMPLATE
+            .replace("__ENRICHED_PATH__", repr(state.get("enriched_data_path", "")))
+            .replace("__TASK_TYPE__", repr(state["task_type"]))
+            .replace("__PRIMARY_METRIC__", repr(state["primary_metric"]))
+            .replace("__WINNER_CLASS__", repr(state.get("winner_model_class", "xgb.XGBClassifier")))
+            .replace("__WINNER_PATH__", repr(state.get("winner_model_path", "")))
+            .replace("__N_TRIALS__", repr(n_trials))
+            .replace("__IMBALANCE_STRATEGY__", repr(state.get("imbalance_strategy", "none")))
+            .replace("__SEARCH_SPACE__", repr(
+                registry.search_space_for(state.get("winner_model_class", ""))))
         )
 
         result = await self.execute_code(code, run_id, timeout=400)
+        result = await self.try_agentic_repair(
+            run_id, code, result,
+            task_type=state.get("task_type", "unknown"),
+            result_keys=["tuned_score", "best_params", "n_trials_completed", "tuned_path"],
+            goal=(f"Tune {winner} (class {state.get('winner_model_class','')}) on enriched.csv "
+                  "(has a '__target__' column) via a small hyperparameter search, refit the best "
+                  "model on all training data, save it to artifacts_dir/tuned_model.pkl. Set RESULT "
+                  "with tuned_score (float), best_params (dict), n_trials_completed (int), tuned_path (str)."),
+            timeout=400,
+        )
         if not result["success"]:
             await self._mark_step(run_id, "failed", result["error"])
             return {"error": f"Tuning failed: {result['error']}", "status": "failed"}

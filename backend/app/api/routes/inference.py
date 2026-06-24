@@ -57,6 +57,8 @@ preprocessor = data["preprocessor"]
 model = data["model"]
 threshold = data.get("threshold", 0.5)
 target_classes = data.get("target_classes") or []
+task_type = data.get("task_type") or "unknown"
+multilabel_binarizer = data.get("multilabel_binarizer")
 
 rows = INPUT_ROWS
 X_raw = pd.DataFrame(rows)   # original input — engineered formulas reference raw column names
@@ -116,7 +118,19 @@ def decode(label):
     return label
 
 predictions = []
-if hasattr(model, "predict_proba"):
+if task_type == "multilabel_classification":
+    # MultiOutputClassifier → binary matrix (n_samples, n_labels). Decode each row
+    # to a SET of label names via the saved MultiLabelBinarizer.
+    y_bin = np.asarray(model.predict(X_t))
+    if multilabel_binarizer is not None:
+        label_sets = multilabel_binarizer.inverse_transform(y_bin)
+        for labels in label_sets:
+            predictions.append({"prediction": [str(l) for l in labels], "confidence": None})
+    else:
+        for row in y_bin:
+            on = [str(i) for i, v in enumerate(row) if int(v) == 1]
+            predictions.append({"prediction": on, "confidence": None})
+elif hasattr(model, "predict_proba"):
     proba = model.predict_proba(X_t)
     if proba.shape[1] == 2:
         for p in proba:
@@ -406,10 +420,13 @@ async def predict(run_id: str, request: PredictRequest) -> dict:
     # Log every prediction — this is the raw material for drift detection
     async with AsyncSessionLocal() as db:
         for row, pred in zip(request.rows, predictions):
+            pv = pred["prediction"]
+            # multilabel predictions are lists — store as JSON for clean round-trip
+            pred_str = __import__("json").dumps(pv) if isinstance(pv, list) else str(pv)
             db.add(PredictionLog(
                 run_id=run_id,
                 features=row,
-                prediction=str(pred["prediction"]),
+                prediction=pred_str,
                 confidence=pred.get("confidence"),
                 latency_ms=round(per_row_latency, 1),
             ))

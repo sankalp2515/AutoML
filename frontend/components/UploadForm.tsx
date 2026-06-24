@@ -15,6 +15,7 @@ export default function UploadForm() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [pipeline, setPipeline] = useState<'tabular' | 'timeseries'>('tabular');
   const [goal, setGoal] = useState('');
   const [excludeColumns, setExcludeColumns] = useState('');
   const [fpFnPref, setFpFnPref] = useState('');
@@ -64,6 +65,7 @@ export default function UploadForm() {
     fd.append('exclude_columns', excludeColumns.trim());
     fd.append('fp_fn_preference', fpFnPref.trim());
     fd.append('interpretability_required', String(interpretability));
+    fd.append('pipeline', pipeline);
 
     try {
       const run = await createRun(fd);
@@ -76,6 +78,43 @@ export default function UploadForm() {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-7">
+      {/* ── The studio (pipeline mode) ──────────────────────────────────── */}
+      <div>
+        <p className="eyebrow-dim mb-3">The Studio</p>
+        <div className="grid grid-cols-2 gap-2">
+          {([
+            ['tabular', 'Tabular', 'Classification & regression on flat data', false],
+            ['timeseries', 'Time-Series & Quant', 'Forecasting · walk-forward validation', false],
+          ] as const).map(([val, label, desc, soon]) => (
+            <button
+              key={val}
+              type="button"
+              disabled={soon}
+              onClick={() => !soon && setPipeline(val)}
+              className={`relative text-left rounded-xl border p-4 transition-all duration-300 ${
+                soon
+                  ? 'border-bone/10 bg-obsidian-900/30 cursor-not-allowed opacity-60'
+                  : pipeline === val
+                  ? 'border-gold-500/60 bg-gold-500/[0.07]'
+                  : 'border-bone/15 hover:border-gold-700/50 bg-obsidian-900/40'
+              }`}
+            >
+              {soon && (
+                <span className="absolute top-2 right-2 font-mono text-[8px] uppercase tracking-luxe text-gold-600 border border-gold-700/50 rounded-full px-2 py-0.5">
+                  Soon
+                </span>
+              )}
+              <span className={`block font-display text-base ${pipeline === val && !soon ? 'text-gold-200' : 'text-bone-dim'}`}>
+                {label}
+              </span>
+              <span className="block font-mono text-[10px] text-bone-ghost mt-1 leading-relaxed">
+                {desc}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ── The dataset ─────────────────────────────────────────────────── */}
       <div>
         <p className="eyebrow-dim mb-3">i. The Dataset</p>

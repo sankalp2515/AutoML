@@ -24,14 +24,16 @@ import ArtifactsPanel from '@/components/ArtifactsPanel';
 import LLMStatsPanel from '@/components/LLMStatsPanel';
 import NotebookViewer from '@/components/NotebookViewer';
 import DeployPanel from '@/components/DeployPanel';
+import ModelToolsPanel from '@/components/ModelToolsPanel';
 
-type Tab = 'progress' | 'results' | 'notebook' | 'deploy' | 'artifacts' | 'llm';
+type Tab = 'progress' | 'results' | 'notebook' | 'deploy' | 'tools' | 'artifacts' | 'llm';
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'progress', label: 'Live Progress', icon: '📡' },
   { id: 'results', label: 'Results', icon: '📈' },
   { id: 'notebook', label: 'Notebook', icon: '📓' },
   { id: 'deploy', label: 'Deploy', icon: '🚀' },
+  { id: 'tools', label: 'Tools', icon: '🛠' },
   { id: 'artifacts', label: 'Artifacts', icon: '📦' },
   { id: 'llm', label: 'LLM Stats', icon: '🧠' },
 ];
@@ -315,6 +317,7 @@ export default function RunPage() {
                 (t.id === 'results' && !results && !isCompleted) ||
                 (t.id === 'notebook' && !isCompleted) ||
                 (t.id === 'deploy' && !isCompleted) ||
+                (t.id === 'tools' && !isCompleted) ||
                 (t.id === 'artifacts' && artifacts.length === 0 && !isCompleted) ||
                 (t.id === 'llm' && !llmStats && !isCompleted);
               return (
@@ -364,6 +367,12 @@ export default function RunPage() {
             {tab === 'deploy' && (
               <div className="p-5">
                 <DeployPanel runId={runId} />
+              </div>
+            )}
+
+            {tab === 'tools' && (
+              <div className="p-5">
+                <ModelToolsPanel runId={runId} />
               </div>
             )}
 

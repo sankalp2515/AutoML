@@ -22,17 +22,36 @@ class AgentState(TypedDict, total=False):
     fp_fn_preference: str
     interpretability_required: bool
     data_dir: str
+    pipeline: str                   # "tabular" (default) | "timeseries" — selects which graph runs
+
+    # Time-Series studio (P3/T1) — forecasting framing + the Wrong-Door Guard
+    timestamp_col: str
+    forecast_horizon: int
+    frequency: str                  # e.g. "D", "H", "W"
+    wrong_door_warning: str         # set by tabular auditor when time-ordered data is detected
 
     # Problem Framer outputs
-    task_type: str                  # binary_classification | multiclass | regression
+    task_type: str                  # binary_classification | multiclass_classification | multilabel_classification | regression
     target_column: str
     primary_metric: str
     good_enough_threshold: float
     inference_features: list[str]
+    # Multilabel specific
+    label_columns: list[str]        # for multiple binary target columns
+    label_delimiter: str            # for delimited string targets (e.g. ";")
 
     # Data Auditor outputs
     data_audit: dict[str, Any]
     audit_verdict: str
+    imbalance_severity: str  # "none" | "moderate" | "severe" (minority < 5%)
+
+    # Honest evaluation (Phase 0.2) — a true holdout is carved from the RAW
+    # dataset BEFORE any agent fits/selects/tunes, so the reported final score
+    # is a generalization estimate, not the selection CV.
+    holdout_path: str               # raw never-seen rows; only the evaluator touches it
+    holdout_frac: float             # fraction reserved (0 when dataset too small → CV fallback)
+    evaluation_basis: str           # "holdout" | "in_sample_split" (fallback) — set by evaluator
+    score_std: float                # CV std of the primary score on train — the iteration noise floor
 
     # Baseline Builder outputs
     baseline_score: float
@@ -48,6 +67,12 @@ class AgentState(TypedDict, total=False):
     preprocessor_path: str
     processed_data_path: str        # path to processed.csv for downstream agents
     target_classes: list[str]       # original class labels when target was label-encoded
+    # Imbalance (P18) + multilabel (P19) — returned by preprocessor; MUST be declared
+    # here or LangGraph silently drops them and they never reach exporter/inference.
+    imbalance_strategy: str         # "smote" | "smote_tomek" | "class_weight" | "none"
+    training_pipeline_path: str     # imblearn prep+resample pkl (documentation artifact; not used for CV)
+    multilabel_binarizer_path: str  # path to MultiLabelBinarizer.pkl for multilabel decode
+    resampler_used: str             # "smote" | "smote_tomek" | "none" — what actually ran
 
     # Feature Engineer outputs
     features_created: list[dict[str, Any]]
@@ -75,6 +100,10 @@ class AgentState(TypedDict, total=False):
     iteration_scores: list[float]
     prev_score: float
     current_score: float
+
+    # Tier-2 diagnostic router (P8) — bounded back-jump on failure
+    backjumps_used: int
+    repair_hint: str
 
     # Export outputs
     artifact_paths: dict[str, str]

@@ -203,9 +203,26 @@ function PredictPlayground({
           <p className="text-[11px] text-gold-400 uppercase tracking-widest mb-1">
             Prediction
           </p>
-          <p className="text-3xl font-bold text-white tracking-tight">
-            {result.prediction}
-          </p>
+          {Array.isArray(result.prediction) ? (
+            <div className="flex flex-wrap gap-2 justify-center mt-1">
+              {result.prediction.length === 0 ? (
+                <span className="text-bone-faint text-sm italic">no labels</span>
+              ) : (
+                result.prediction.map((lbl) => (
+                  <span
+                    key={lbl}
+                    className="px-3 py-1 rounded-full bg-gold-500/20 border border-gold-500/40 text-gold-200 text-sm font-semibold"
+                  >
+                    {lbl}
+                  </span>
+                ))
+              )}
+            </div>
+          ) : (
+            <p className="text-3xl font-bold text-white tracking-tight">
+              {result.prediction}
+            </p>
+          )}
           <div className="flex items-center justify-center gap-4 mt-2 text-xs text-bone-dim">
             {result.confidence != null && (
               <span>

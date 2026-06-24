@@ -26,7 +26,7 @@ async def test_create_run_rejects_short_goal(client):
 
 @pytest.mark.asyncio
 async def test_create_run_success(client):
-    with patch("app.api.routes.runs._run_pipeline", new_callable=AsyncMock):
+    with patch("app.api.routes.runs.submit_run", new_callable=AsyncMock):
         files = {"file": ("titanic.csv", io.BytesIO(_make_csv()), "text/csv")}
         data = {
             "user_goal": "Predict whether a customer will churn next month",
@@ -52,7 +52,7 @@ async def test_get_run_not_found(client):
 
 @pytest.mark.asyncio
 async def test_get_run_exists(client):
-    with patch("app.api.routes.runs._run_pipeline", new_callable=AsyncMock):
+    with patch("app.api.routes.runs.submit_run", new_callable=AsyncMock):
         files = {"file": ("test.csv", io.BytesIO(_make_csv()), "text/csv")}
         data = {"user_goal": "Predict customer churn from billing data"}
         create_resp = await client.post("/api/v1/runs", data=data, files=files)
@@ -80,7 +80,7 @@ async def test_list_runs(client):
 
 @pytest.mark.asyncio
 async def test_results_returns_409_if_not_complete(client):
-    with patch("app.api.routes.runs._run_pipeline", new_callable=AsyncMock):
+    with patch("app.api.routes.runs.submit_run", new_callable=AsyncMock):
         files = {"file": ("test.csv", io.BytesIO(_make_csv()), "text/csv")}
         data = {"user_goal": "Predict which loans will default next quarter"}
         create_resp = await client.post("/api/v1/runs", data=data, files=files)

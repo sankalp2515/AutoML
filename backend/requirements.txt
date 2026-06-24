@@ -7,6 +7,8 @@ alembic==1.14.0
 pydantic==2.10.3
 pydantic-settings==2.6.1
 redis[asyncio]==5.2.1
+arq==0.26.3
+pyjwt==2.10.1
 langgraph==0.2.60
 groq==0.13.0
 anthropic==0.40.0

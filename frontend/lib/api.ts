@@ -22,8 +22,12 @@ export const WS_BASE = API_BASE.replace('http://', 'ws://').replace(
 );
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  // Attach the Supabase access token when signed in (no-op if auth disabled).
+  const { getAccessToken } = await import('./supabase');
+  const token = await getAccessToken();
+  const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Accept: 'application/json', ...init?.headers },
+    headers: { Accept: 'application/json', ...authHeader, ...init?.headers },
     ...init,
   });
   if (!res.ok) {
@@ -206,4 +210,39 @@ export function connectWebSocket(
   }
 
   return ws;
+}
+
+// ── Backlog P10–P15 client functions ──────────────────────────────────────────
+export async function compareRuns(a: string, b: string) {
+  return apiRequest<Record<string, unknown>>(`/api/v1/runs/compare?a=${a}&b=${b}`);
+}
+
+export async function askModel(runId: string, question: string) {
+  return apiRequest<{ answer: string; cited_agents?: string[] }>(
+    `/api/v1/runs/${runId}/ask`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }) }
+  );
+}
+
+export async function explainPrediction(runId: string, rows: Record<string, unknown>[]) {
+  return apiRequest<{ explanations: { feature: string; contribution: number }[][] }>(
+    `/api/v1/runs/${runId}/explain`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows }) }
+  );
+}
+
+export async function fairnessAudit(runId: string, columns: string) {
+  return apiRequest<Record<string, unknown>>(
+    `/api/v1/runs/${runId}/fairness?columns=${encodeURIComponent(columns)}`
+  );
+}
+
+export async function retrainChallenger(runId: string) {
+  return apiRequest<{ champion_run_id: string; challenger_run_id: string; note: string }>(
+    `/api/v1/runs/${runId}/retrain`, { method: 'POST' }
+  );
+}
+
+export function batchPredictUrl(runId: string): string {
+  return `${API_BASE}/api/v1/runs/${runId}/batch-predict`;
 }

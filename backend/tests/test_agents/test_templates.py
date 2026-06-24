@@ -1,14 +1,20 @@
 """
-Render every sandbox code template with dummy values and compile the result.
+Render every sandbox code template and compile the result.
 
-Catches the recurring bug class: a literal `{...}` added to a .format() template
-without doubled braces raises KeyError at runtime (e.g. the text_cols dict that
-broke the Boston housing run). Also catches syntax errors in rendered code.
+Catches the recurring bug class: a brace mistake in a template that crashes at
+runtime (e.g. an un-doubled `{}` in a .format() template, or a forgotten token).
+
+Two render styles exist (both must render to compilable Python):
+  - FORMAT templates use str.format() — every literal brace must be doubled `{{}}`.
+  - TOKEN templates (tuner, evaluator) are dict/f-string heavy, so they use natural
+    single braces and inject values via .replace("__TOKEN__", repr(value)) like the
+    exporter. These cannot be .format()'d.
 """
 
 import pytest
 
 from app.agents.baseline_builder import BASELINE_CODE_TEMPLATE
+from app.agents.data_splitter import SPLIT_CODE_TEMPLATE
 from app.agents.eda_agent import EDA_CODE_TEMPLATE
 from app.agents.evaluator import EVALUATION_CODE_TEMPLATE
 from app.agents.feature_engineer import FEATURE_CODE_TEMPLATE
@@ -16,59 +22,90 @@ from app.agents.model_selector import TRAINING_CODE_TEMPLATE
 from app.agents.preprocessor import PREPROCESSING_CODE_TEMPLATE
 from app.agents.tuner import TUNING_CODE_TEMPLATE
 
-TEMPLATE_CASES = [
-    (
-        "eda",
-        EDA_CODE_TEMPLATE,
-        {"target_column": "t", "task_type": "regression"},
-    ),
-    (
-        "baseline",
-        BASELINE_CODE_TEMPLATE,
-        {"target_column": "t", "task_type": "binary_classification",
-         "exclude_cols": "[]", "scoring": "roc_auc"},
-    ),
-    (
-        "preprocessing",
-        PREPROCESSING_CODE_TEMPLATE,
-        {"target_column": "t", "task_type": "multiclass_classification",
-         "drop_columns": "[]", "exclude_cols": "[]", "datetime_cols": "[]",
-         "imputation_strategy": "{}", "num_imputer_default": "median",
-         "encoding_strategy": "{}", "scaling_strategy": "standard"},
-    ),
-    (
-        "feature_engineering",
-        FEATURE_CODE_TEMPLATE,
-        {"processed_path": "/x.csv", "target_column": "t",
-         "task_type": "regression", "proposed_features": "[]"},
-    ),
-    (
-        "model_training",
-        TRAINING_CODE_TEMPLATE,
-        {"enriched_path": "/x.csv", "task_type": "binary_classification",
-         "primary_metric": "recall", "class_imbalance": "True",
-         "models_config": "[]"},
-    ),
-    (
-        "tuning",
+
+def _fmt(template, **kwargs):
+    return lambda: template.format(**kwargs)
+
+
+def _tokens(template, **repl):
+    def render():
+        code = template
+        for token, value in repl.items():
+            code = code.replace(token, repr(value))
+        return code
+    return render
+
+
+# Each case: (id, render_callable). render() returns the final sandbox code string.
+RENDER_CASES = [
+    ("eda", _fmt(EDA_CODE_TEMPLATE, target_column="t", task_type="regression")),
+    ("baseline", _fmt(
+        BASELINE_CODE_TEMPLATE, target_column="t", task_type="binary_classification",
+        exclude_cols="[]", scoring="roc_auc", label_columns="[]", label_delimiter="",
+    )),
+    ("preprocessing", _fmt(
+        PREPROCESSING_CODE_TEMPLATE, target_column="t", task_type="multiclass_classification",
+        drop_columns="[]", exclude_cols="[]", datetime_cols="[]",
+        imputation_strategy="{}", num_imputer_default="median",
+        encoding_strategy="{}", scaling_strategy="standard",
+        imbalance_strategy="none", label_columns="[]", label_delimiter="",
+    )),
+    # multilabel path through the preprocessing template (P19)
+    ("preprocessing_multilabel", _fmt(
+        PREPROCESSING_CODE_TEMPLATE, target_column="tags", task_type="multilabel_classification",
+        drop_columns="[]", exclude_cols="[]", datetime_cols="[]",
+        imputation_strategy="{}", num_imputer_default="median",
+        encoding_strategy="{}", scaling_strategy="standard",
+        imbalance_strategy="none", label_columns="[]", label_delimiter=";",
+    )),
+    ("feature_engineering", _fmt(
+        FEATURE_CODE_TEMPLATE, processed_path="/x.csv", target_column="t",
+        task_type="regression", primary_metric="rmse", proposed_features="[]",
+        imbalance_strategy="none",
+    )),
+    ("model_training", _fmt(
+        TRAINING_CODE_TEMPLATE, enriched_path="/x.csv", task_type="binary_classification",
+        primary_metric="recall", class_imbalance="True", models_config="[]",
+        label_columns="[]", label_delimiter="", imbalance_strategy="smote",
+    )),
+    ("tuning", _tokens(
         TUNING_CODE_TEMPLATE,
-        {"enriched_path": "/x.csv", "task_type": "regression",
-         "primary_metric": "rmse", "winner_class": "Ridge",
-         "winner_path": "/w.pkl", "n_trials": 5},
-    ),
-    (
-        "evaluation",
+        __ENRICHED_PATH__="/x.csv", __TASK_TYPE__="regression", __PRIMARY_METRIC__="rmse",
+        __WINNER_CLASS__="Ridge", __WINNER_PATH__="/w.pkl", __N_TRIALS__=5,
+        __IMBALANCE_STRATEGY__="none",
+        __SEARCH_SPACE__={"alpha": {"type": "float", "low": 1e-4, "high": 100.0, "log": True}},
+    )),
+    ("evaluation", _tokens(
         EVALUATION_CODE_TEMPLATE,
-        {"enriched_path": "/x.csv", "tuned_path": "/t.pkl",
-         "task_type": "regression", "primary_metric": "rmse",
-         "fp_fn_preference": ""},
-    ),
+        __ENRICHED_PATH__="/x.csv", __TUNED_PATH__="/t.pkl", __TASK_TYPE__="regression",
+        __PRIMARY_METRIC__="rmse", __FP_FN_PREFERENCE__="",
+        __HOLDOUT_PATH__="/h.csv", __PREPROCESSOR_PATH__="/p.pkl",
+        __ENGINEERED_FEATURES__=[{"name": "f1", "formula": "a / b", "fill_value": 0.0}],
+        __TARGET_CLASSES__=["a", "b"], __TARGET_COLUMN__="t",
+        __LABEL_COLUMNS__=[], __LABEL_DELIMITER__="", __MLB_PATH__="/m.pkl",
+    )),
+    # multilabel-delimiter path through the evaluation holdout transform (P19)
+    ("evaluation_multilabel", _tokens(
+        EVALUATION_CODE_TEMPLATE,
+        __ENRICHED_PATH__="/x.csv", __TUNED_PATH__="/t.pkl",
+        __TASK_TYPE__="multilabel_classification",
+        __PRIMARY_METRIC__="f1_macro", __FP_FN_PREFERENCE__="",
+        __HOLDOUT_PATH__="/h.csv", __PREPROCESSOR_PATH__="/p.pkl",
+        __ENGINEERED_FEATURES__=[], __TARGET_CLASSES__=[], __TARGET_COLUMN__="tags",
+        __LABEL_COLUMNS__=[], __LABEL_DELIMITER__=";", __MLB_PATH__="/m.pkl",
+    )),
+    ("data_split", _tokens(
+        SPLIT_CODE_TEMPLATE,
+        __TARGET_COLUMN__="t", __TASK_TYPE__="binary_classification",
+        __HOLDOUT_FRAC__=0.2, __MIN_ROWS__=60,
+    )),
 ]
 
 
-@pytest.mark.parametrize("name,template,kwargs", TEMPLATE_CASES, ids=[c[0] for c in TEMPLATE_CASES])
-def test_template_renders_and_compiles(name, template, kwargs):
-    # .format() raises KeyError/IndexError on any unescaped literal brace
-    code = template.format(**kwargs)
-    # compile() catches syntax errors in the rendered sandbox code
+@pytest.mark.parametrize("name,render", RENDER_CASES, ids=[c[0] for c in RENDER_CASES])
+def test_template_renders_and_compiles(name, render):
+    # .format() raises KeyError/IndexError on any unescaped literal brace;
+    # token templates must have every __TOKEN__ replaced.
+    code = render()
+    assert "__" + "ENRICHED_PATH__" not in code, f"{name}: unreplaced token remains"
     compile(code, f"<{name}_template>", "exec")

@@ -3,6 +3,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from app.core import context
 from app.core import metrics
 from app.core.llm import get_llm
 from app.core.logging import get_logger
@@ -20,6 +21,12 @@ from app.sandbox.executor import get_executor
 # MAX_REPAIRS attempts, after which we fail fast as before. Because repairs stay
 # inside the template vocabulary, the sandbox safety model is untouched.
 MAX_REPAIRS = 2
+
+_AGENTIC_WRITE_SYSTEM = """You are a senior ML engineer writing Python that runs in a
+restricted sandbox. The vetted template failed on this dataset; write code that handles
+the actual data and succeeds. Be defensive (NaN, dtype, shape edge cases). Use ONLY the
+allowed libraries, set the required RESULT dict, and never use os/open/eval/network.
+Respond with JSON: {"diagnosis": "<one line>", "code": "<complete runnable script>"}."""
 
 REPAIR_SYSTEM_PROMPT = """You are a senior ML engineer debugging a failed pipeline step.
 
@@ -50,7 +57,6 @@ class BaseAgent:
         self.llm = get_llm()
         self.executor = get_executor()
         self._log = get_logger(self.name)
-        self._agent_start_time: float = 0.0
 
     async def run(self, state: AgentState) -> dict[str, Any]:
         raise NotImplementedError
@@ -58,10 +64,10 @@ class BaseAgent:
     # ── Instrumented wrappers ─────────────────────────────────────────────────
 
     async def execute_code(
-        self, code: str, run_id: str, timeout: int = 120
+        self, code: str, run_id: str, timeout: int = 120, restricted: bool = False
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
-        result = await self.executor.execute(code, run_id, timeout)
+        result = await self.executor.execute(code, run_id, timeout, restricted=restricted)
         elapsed = time.perf_counter() - t0
 
         status = "success" if result.get("success") else (
@@ -213,14 +219,14 @@ class BaseAgent:
         now = datetime.now(timezone.utc)
 
         if status == "running":
-            self._agent_start_time = time.perf_counter()
+            # Bind this asyncio task to (run_id, agent) so every LLM call made
+            # while this agent runs is attributed correctly — even when other
+            # runs execute concurrently. Replaces shared singleton attributes.
+            context.set_agent_context(run_id, self.name, time.perf_counter())
             self._log.info("agent_started", run_id=run_id, agent=self.name)
-            # Set context so LLM calls know which agent is calling
-            self.llm._current_agent = self.name
-            self.llm._current_run_id = run_id
 
         elif status in ("completed", "failed"):
-            elapsed = time.perf_counter() - self._agent_start_time
+            elapsed = time.perf_counter() - context.get_agent_start()
             metrics.agent_runs_total.labels(agent_name=self.name, status=status).inc()
             metrics.agent_duration_seconds.labels(agent_name=self.name).observe(elapsed)
 
@@ -318,3 +324,104 @@ class BaseAgent:
                 for key, value in fields.items():
                     setattr(run, key, value)
                 await db.commit()
+
+    async def try_agentic_repair(
+        self,
+        run_id: str,
+        code: str,
+        failed_result: dict,
+        *,
+        result_keys: list[str],
+        goal: str,
+        task_type: str = "unknown",
+        tags: list[str] | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        """Uniform template-first → agentic-repair fallback (Phase 2).
+
+        Pass the failed sandbox `result`; if it failed, the agent WRITES a
+        corrected script (restricted sandbox, cookbook-seeded) and retries until
+        it produces a RESULT with `result_keys`. Returns a success result or the
+        (still-failed) result. A no-op when `failed_result` already succeeded, so
+        the happy path costs nothing. Every agent uses this so NO template error
+        is fatal until the agent has tried to fix it.
+        """
+        if failed_result.get("success"):
+            return failed_result
+        return await self.execute_code_agentic(
+            run_id, code, str(failed_result.get("error", "")),
+            agent_role=self.name, task_type=task_type,
+            tags=tags or [self.name], goal=goal,
+            result_keys=result_keys, timeout=timeout,
+        )
+
+    # ── E3: agentic write/debug loop (template-first; this is the failure path) ──
+    async def execute_code_agentic(
+        self, run_id: str, failed_code: str, error: str, *,
+        agent_role: str, task_type: str, tags: list[str], goal: str,
+        result_keys: list[str], timeout: int = 180, max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        """When a vetted template fails, the agent WRITES corrected code itself —
+        seeded by prior fixes from the cookbook — runs it under the restricted
+        sandbox, reads the traceback, and retries. Successful fixes are stored.
+        Returns the sandbox result (with `agentic_used`), or a failure dict."""
+        from app.core import code_cookbook
+
+        fixes = code_cookbook.retrieve(agent_role, task_type, tags, keywords=error, k=2)
+        fixes_text = "\n\n".join(
+            f"# prior fix (provenance={f.get('provenance')}, used {f.get('success_count')}x):\n"
+            f"{f.get('code', '')[:1500]}"
+            for f in fixes
+        ) or "(no prior fixes found)"
+
+        last_err = error
+        last_code = failed_code
+        for attempt in range(1, max_attempts + 1):
+            await self.emit(run_id, f"Agent writing a fix ({attempt}/{max_attempts})…", {"agentic": attempt})
+            user = (
+                f"GOAL: {goal}\n\nThe vetted template failed. Write CORRECTED, complete Python "
+                f"for the sandbox.\n\nSANDBOX CONTRACT:\n"
+                f"- Preloaded vars: dataset_path (str CSV path), artifacts_dir (str dir), run_id (str), "
+                f"and modules pd, np, json, joblib.\n"
+                f"- You MUST set RESULT = a dict containing these keys: {result_keys}.\n"
+                f"- Allowed imports ONLY: pandas, numpy, sklearn, xgboost, scipy, imblearn, joblib, "
+                f"json, math, re, datetime, statistics, collections, itertools, warnings, random.\n"
+                f"- FORBIDDEN: os, sys, subprocess, open(), eval, exec, network. Save files with "
+                f'joblib.dump(obj, artifacts_dir + "/name.pkl").\n\n'
+                f"PRIOR FIXES (adapt if relevant):\n{fixes_text}\n\n"
+                f"FAILED CODE:\n```python\n{last_code[:2500]}\n```\n\n"
+                f"TRACEBACK:\n```\n{last_err[-1500:]}\n```\n\n"
+                f'Respond JSON: {{"diagnosis": "...", "code": "<full corrected script>"}}'
+            )
+            try:
+                resp = await self.llm.complete_json(_AGENTIC_WRITE_SYSTEM, user)
+            except Exception as exc:
+                last_err = f"LLM write failed: {exc}"
+                break
+            code = resp.get("code", "")
+            if not code or len(code) < 20:
+                last_err = "LLM returned no code"
+                continue
+
+            result = await self.execute_code(code, run_id, timeout, restricted=True)
+            res = result.get("result")
+            ok = (result.get("success") and isinstance(res, dict)
+                  and all(k in res for k in result_keys))
+            if ok:
+                code_cookbook.record_success(
+                    agent_role, task_type, tags, signature=error[:300],
+                    code=code, result_keys=result_keys, provenance="repaired",
+                )
+                metrics.agent_repairs_total.labels(agent_name=self.name, outcome="recovered").inc()
+                self._log.info("agentic_repair_recovered", run_id=run_id, agent=self.name, attempt=attempt)
+                result["agentic_used"] = True
+                return result
+
+            last_code = code
+            last_err = str(result.get("error", "")) or "RESULT missing required keys"
+
+        metrics.agent_repairs_total.labels(agent_name=self.name, outcome="exhausted").inc()
+        self._log.error("agentic_repair_exhausted", run_id=run_id, agent=self.name)
+        return {"success": False, "result": None, "stdout": "",
+                "error": f"Agentic repair exhausted. Last error: {last_err[:400]}",
+                "agentic_used": True}

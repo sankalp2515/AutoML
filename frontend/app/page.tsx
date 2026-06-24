@@ -4,7 +4,7 @@ const PILLARS = [
   {
     numeral: 'I',
     title: 'Autonomous Craft',
-    desc: 'Ten specialist agents — auditor to exporter — each making and defending its own decisions. No templates, no fixed recipes.',
+    desc: 'Ten specialist agents — auditor to exporter — each making and defending its own decisions, every claim verified by execution. When a step hits an edge case, the agent writes and runs its own fix.',
   },
   {
     numeral: 'II',

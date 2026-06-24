@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.agents.baseline_builder import BaselineBuilderAgent
 from app.agents.data_auditor import DataAuditorAgent
+from app.agents.data_splitter import DataSplitterAgent
 from app.agents.eda_agent import EDAAgent
 from app.agents.evaluator import EvaluatorAgent
 from app.agents.exporter import ExporterAgent
@@ -32,6 +33,7 @@ from app.redis_client import publish_progress, set_run_state
 # ── Agent singletons ──────────────────────────────────────────────────────────
 _problem_framer = ProblemFramerAgent()
 _data_auditor = DataAuditorAgent()
+_data_splitter = DataSplitterAgent()
 _baseline_builder = BaselineBuilderAgent()
 _eda_agent = EDAAgent()
 _preprocessor = PreprocessorAgent()
@@ -49,6 +51,10 @@ async def node_data_auditor(state: AgentState) -> dict:
 
 async def node_problem_framer(state: AgentState) -> dict:
     return await _problem_framer.run(state)
+
+
+async def node_data_splitter(state: AgentState) -> dict:
+    return await _data_splitter.run(state)
 
 
 async def node_baseline(state: AgentState) -> dict:
@@ -109,10 +115,14 @@ def route_after_evaluator(state: AgentState) -> Literal["feature_engineer", "exp
     prev = state.get("prev_score", 0.0)
     improvement = abs(current - prev)
 
-    should_iterate = (
-        iteration < max_iter
-        and improvement >= settings.IMPROVEMENT_THRESHOLD
-    )
+    # Significance gate: only iterate if the change clears BOTH the configured
+    # threshold AND the run's measured noise floor (CV std of the score). A gain
+    # smaller than fold-to-fold noise is not real improvement — chasing it just
+    # overfits the evaluation. (Phase 0.2)
+    noise_floor = float(state.get("score_std", 0.0) or 0.0)
+    min_delta = max(settings.IMPROVEMENT_THRESHOLD, noise_floor)
+
+    should_iterate = iteration < max_iter and improvement >= min_delta
     return "feature_engineer" if should_iterate else "exporter"
 
 
@@ -129,12 +139,36 @@ def _make_failfast_router(next_node: str):
     return router
 
 
+def _make_diagnostic_router(next_node: str):
+    """Tier-2 (P8): on failure, jump back ONCE to re-examine the data (diagnostic →
+    eda) instead of ending. After one back-jump the run fails fast as before."""
+    def router(state: AgentState) -> str:
+        if state.get("status") == "failed":
+            return "diagnostic" if state.get("backjumps_used", 0) < 1 else END
+        return next_node
+    return router
+
+
+async def node_diagnostic(state: AgentState) -> dict:
+    """Clear the failed status, record a hint from the error, and let the run
+    re-enter EDA → preprocessor once. Bounded by backjumps_used."""
+    err = str(state.get("error", ""))[:300]
+    _log.info("diagnostic_backjump", run_id=state.get("run_id"), error=err[:120])
+    return {
+        "status": "running",
+        "error": None,
+        "backjumps_used": state.get("backjumps_used", 0) + 1,
+        "repair_hint": f"A prior step failed: {err}. Re-examine column types / encodings and adjust.",
+    }
+
+
 # ── Build the graph ───────────────────────────────────────────────────────────
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("data_auditor", node_data_auditor)
     graph.add_node("problem_framer", node_problem_framer)
+    graph.add_node("data_splitter", node_data_splitter)
     graph.add_node("baseline_builder", node_baseline)
     graph.add_node("eda_agent", node_eda)
     graph.add_node("preprocessor", node_preprocessor)
@@ -143,6 +177,7 @@ def build_graph() -> StateGraph:
     graph.add_node("tuner", node_tuner)
     graph.add_node("evaluator", node_evaluator)
     graph.add_node("exporter", node_exporter)
+    graph.add_node("diagnostic", node_diagnostic)
 
     graph.set_entry_point("data_auditor")
 
@@ -151,7 +186,8 @@ def build_graph() -> StateGraph:
         route_after_audit,
         {"problem_framer": "problem_framer", END: END},
     )
-    graph.add_edge("problem_framer", "baseline_builder")
+    graph.add_edge("problem_framer", "data_splitter")
+    graph.add_edge("data_splitter", "baseline_builder")
     graph.add_conditional_edges(
         "baseline_builder",
         route_after_baseline,
@@ -163,10 +199,13 @@ def build_graph() -> StateGraph:
         "eda_agent", _make_failfast_router("preprocessor"),
         {"preprocessor": "preprocessor", END: END},
     )
+    # Preprocessor uses the Tier-2 diagnostic router: a failure (usually a data-type
+    # surprise) jumps back to EDA once to re-examine, then fails fast.
     graph.add_conditional_edges(
-        "preprocessor", _make_failfast_router("feature_engineer"),
-        {"feature_engineer": "feature_engineer", END: END},
+        "preprocessor", _make_diagnostic_router("feature_engineer"),
+        {"feature_engineer": "feature_engineer", "diagnostic": "diagnostic", END: END},
     )
+    graph.add_edge("diagnostic", "eda_agent")
     graph.add_conditional_edges(
         "feature_engineer", _make_failfast_router("model_selector"),
         {"model_selector": "model_selector", END: END},
@@ -231,6 +270,7 @@ async def run_pipeline(run_id: str) -> None:
         "exclude_columns": run.exclude_columns or [],
         "fp_fn_preference": run.fp_fn_preference or "",
         "interpretability_required": run.interpretability_required,
+        "pipeline": getattr(run, "pipeline", "tabular") or "tabular",
         "decision_log": [],
         "notebook_cells": [],      # each agent appends its executed code + results
         "iteration": 0,
@@ -252,8 +292,20 @@ async def run_pipeline(run_id: str) -> None:
     })
 
     try:
-        graph = get_graph()
-        final_state: AgentState = await graph.ainvoke(initial_state)
+        # Branch to the Time-Series studio graph when the user selected it.
+        if initial_state.get("pipeline") == "timeseries":
+            from app.agents.ts_orchestrator import get_ts_graph
+            graph = get_ts_graph()
+        else:
+            graph = get_graph()
+        # R6: optional hard wall-clock budget for the whole run.
+        if settings.MAX_RUN_SECONDS and settings.MAX_RUN_SECONDS > 0:
+            import asyncio
+            final_state: AgentState = await asyncio.wait_for(
+                graph.ainvoke(initial_state), timeout=settings.MAX_RUN_SECONDS
+            )
+        else:
+            final_state = await graph.ainvoke(initial_state)
 
         status = "completed" if final_state.get("status") != "failed" else "failed"
         elapsed = (datetime.now(timezone.utc) - pipeline_start).total_seconds()

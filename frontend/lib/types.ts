@@ -98,7 +98,8 @@ export interface DeploymentInfo {
 }
 
 export interface Prediction {
-  prediction: string;
+  // multilabel predictions are an array of label names; single-label are a string
+  prediction: string | string[];
   confidence: number | null;
 }
 

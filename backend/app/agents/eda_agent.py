@@ -70,12 +70,21 @@ for c in num_cols:
 
 # Class imbalance
 class_imbalance = None
+imbalance_severity = "none"
 if task_type != "regression" and target_col in df.columns:
     vc = df[target_col].value_counts(normalize=True)
+    ratio = round(vc.max() / vc.min(), 2) if vc.min() > 0 else None
+    minority_pct = float(vc.min() * 100) if len(vc) >= 2 else 0.0
+    if minority_pct < 5.0:
+        imbalance_severity = "severe"
+    elif minority_pct < 20.0:
+        imbalance_severity = "moderate"
     class_imbalance = {{
-        "ratio": round(vc.max() / vc.min(), 2) if vc.min() > 0 else None,
+        "ratio": ratio,
         "distribution": vc.round(4).to_dict(),
         "imbalanced": bool(vc.max() > 0.7),
+        "minority_pct": round(minority_pct, 2),
+        "severity": imbalance_severity,
     }}
 
 # Datetime columns
@@ -141,6 +150,7 @@ RESULT = {{
     "low_cardinality_num_cols": low_cardinality_num,
     "outlier_pct": outlier_pct,
     "class_imbalance": class_imbalance,
+    "imbalance_severity": imbalance_severity,
     "datetime_cols": datetime_cols,
     "text_cols": text_cols,
     "plots_generated": ["target_distribution.png", "correlation_heatmap.png"],
@@ -183,6 +193,17 @@ class EDAAgent(BaseAgent):
         )
 
         result = await self.execute_code(code, run_id, timeout=180)
+        result = await self.try_agentic_repair(
+            run_id, code, result,
+            task_type=state.get("task_type", "unknown"),
+            result_keys=["num_cols", "cat_cols", "skewness", "high_corr_pairs",
+                         "high_cardinality_cols", "outlier_pct", "datetime_cols",
+                         "corr_with_target"],
+            goal=("Profile dataset_path (which has a '__target__' column or target_column) for EDA: "
+                  "set RESULT with num_cols, cat_cols (lists), skewness ({col: float}), "
+                  "high_corr_pairs (list), high_cardinality_cols (dict), outlier_pct ({col: pct}), "
+                  "datetime_cols (list), corr_with_target ({col: corr})."),
+        )
         if not result["success"]:
             await self._mark_step(run_id, "failed", result["error"])
             return {"error": f"EDA failed: {result['error']}", "status": "failed"}

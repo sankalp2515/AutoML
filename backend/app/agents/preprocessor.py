@@ -27,11 +27,25 @@ Respond with JSON:
   },
   "scaling_strategy": "standard" | "minmax" | "robust" | "none",
   "handle_imbalance": true | false,
-  "imbalance_strategy": "class_weight" | "smote" | "none"
+  "imbalance_strategy": "class_weight" | "smote" | "smote_tomek" | "none"
 }
 
 Use "text_tfidf" for FREE-TEXT columns (reviews, descriptions, messages — avg length > 30 chars).
 TF-IDF extracts up to 200 n-gram features per text column. Never one-hot a free-text column.
+
+Imbalance strategy guidance:
+- "class_weight": use model's class_weight="balanced" (no resampling, safe for all models)
+- "smote": SMOTE oversampling inside CV folds ONLY (via imblearn.pipeline.Pipeline) — best for severe imbalance (<5% minority)
+- "smote_tomek": SMOTE + Tomek links cleaning inside CV folds — good for noisy imbalanced data
+- "none": no imbalance handling
+
+CRITICAL: SMOTE/SMOTE+Tomek are applied ONLY during training (inside CV folds via imblearn.pipeline.Pipeline).
+The saved inference preprocessor.pkl MUST NOT include any resampler — resampling is train-time only.
+
+For MULTILABEL classification:
+- If label_delimiter is set: target column contains delimited strings (e.g. "tag1;tag2"). The preprocessor builds a MultiLabelBinarizer.
+- If label_columns is set: multiple binary columns represent labels (e.g. "label_a", "label_b" all 0/1). The preprocessor passes them through as-is.
+- The multilabel binarizer (or identity for binary columns) is saved for inference decoding.
 """
 
 PREPROCESSING_CODE_TEMPLATE = '''
@@ -46,14 +60,28 @@ warnings.filterwarnings("ignore")
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import (StandardScaler, MinMaxScaler, RobustScaler,
-                                    OneHotEncoder, OrdinalEncoder, LabelEncoder)
+                                    OneHotEncoder, OrdinalEncoder, LabelEncoder,
+                                    MultiLabelBinarizer)
 from sklearn.compose import ColumnTransformer
+# imblearn pipeline applies resampling ONLY during fit() — never during transform()
+# This ensures no data leakage: resampling happens inside each CV fold, never on validation data.
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
 
 df = pd.read_csv(dataset_path)
 target_col = "{target_column}"
 task_type = "{task_type}"
 drop_cols = {drop_columns}
 exclude_cols = {exclude_cols}
+imbalance_strategy = "{imbalance_strategy}"
+
+# Drop rows with a MISSING TARGET — models cannot train on NaN labels
+# ("Input y contains NaN"). Applied to every read of the source so X and y align.
+if target_col and target_col in df.columns:
+    df = df[df[target_col].notna()].reset_index(drop=True)
+label_columns = {label_columns}
+label_delimiter = "{label_delimiter}"
 
 # Drop user-excluded and agent-flagged columns
 all_drop = list(set(drop_cols + exclude_cols + [target_col]))
@@ -72,10 +100,10 @@ for c in datetime_cols:
         df[c + "_dayofweek"] = dt.dt.dayofweek
         df = df.drop(columns=[c])
 
-# Final feature columns
-feature_cols = df.columns.tolist()
-num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-cat_cols = df.select_dtypes(exclude=["number"]).columns.tolist()
+# Final feature columns (excluding target and label_columns)
+feature_cols = [c for c in df.columns if c != target_col and c not in label_columns]
+num_cols = df[feature_cols].select_dtypes(include=["number"]).columns.tolist()
+cat_cols = df[feature_cols].select_dtypes(exclude=["number"]).columns.tolist()
 
 # Imputation
 imputation = {imputation_strategy}
@@ -131,7 +159,7 @@ elif scaling == "robust":
 else:
     scaler = "passthrough"
 
-# Build ColumnTransformer
+# Build ColumnTransformer (preprocessor for inference — NO resampler)
 transformers = []
 if num_cols:
     transformers.append((
@@ -169,35 +197,117 @@ preprocessor = ColumnTransformer(transformers, remainder="drop", sparse_threshol
 
 # Read original df with target for saving
 df_full = pd.read_csv(dataset_path)
+if target_col and target_col in df_full.columns:
+    df_full = df_full[df_full[target_col].notna()].reset_index(drop=True)
 df_full = df_full.drop(columns=[c for c in drop_existing if c != target_col], errors="ignore")
-y = df_full[target_col]
 
-# Label-encode non-numeric targets so ALL downstream models train on integer
-# classes — XGBoost rejects string labels outright. Class names are preserved
-# so inference can decode integer predictions back to the original labels.
+# Handle multilabel targets
+multilabel_binarizer = None
 target_classes = []
-if task_type != "regression" and not pd.api.types.is_numeric_dtype(y):
-    le_target = LabelEncoder()
-    y = pd.Series(le_target.fit_transform(y.astype(str)))
-    target_classes = [str(c) for c in le_target.classes_]
 
-# Fit preprocessor
+if task_type == "multilabel_classification":
+    if label_delimiter:
+        # Target is a delimited string (e.g. "tag1;tag2;tag3")
+        # Split into list of labels per row
+        y_raw = df_full[target_col].astype(str).apply(lambda x: x.split(label_delimiter) if x else [])
+        mlb = MultiLabelBinarizer()
+        y = mlb.fit_transform(y_raw)
+        multilabel_binarizer = mlb
+        target_classes = mlb.classes_.tolist()
+    elif label_columns:
+        # Multiple binary columns represent labels
+        y = df_full[label_columns].values.astype(int)
+        multilabel_binarizer = "identity"  # marker for inference
+        target_classes = label_columns
+    else:
+        # Fallback: treat as single-label
+        y = df_full[target_col]
+        if not pd.api.types.is_numeric_dtype(y):
+            le_target = LabelEncoder()
+            y = pd.Series(le_target.fit_transform(y.astype(str)))
+            target_classes = [str(c) for c in le_target.classes_]
+else:
+    # Single-label classification or regression
+    y = df_full[target_col]
+    if task_type != "regression" and not pd.api.types.is_numeric_dtype(y):
+        le_target = LabelEncoder()
+        y = pd.Series(le_target.fit_transform(y.astype(str)))
+        target_classes = [str(c) for c in le_target.classes_]
+
+# Fit preprocessor (for inference pipeline — no resampling)
 X_transformed = preprocessor.fit_transform(df)
 
-# Save preprocessor
+# Save preprocessor (inference-safe: no resampler)
 os.makedirs(artifacts_dir, exist_ok=True)
 preprocessor_path = os.path.join(artifacts_dir, "preprocessor.pkl")
 joblib.dump(preprocessor, preprocessor_path)
 
-# Save processed dataset for next agents
+# Save multilabel binarizer if multilabel
+multilabel_binarizer_path = ""
+if task_type == "multilabel_classification" and multilabel_binarizer is not None:
+    multilabel_binarizer_path = os.path.join(artifacts_dir, "multilabel_binarizer.pkl")
+    joblib.dump(multilabel_binarizer, multilabel_binarizer_path)
+
+# Build TRAINING pipeline with resampler (imblearn.pipeline.Pipeline)
+# This is used by downstream agents for CV — resampling happens INSIDE each fold.
+# The resampler is NEVER saved to preprocessor.pkl.
+# Note: SMOTE not directly applicable to multilabel; skip resampling for multilabel
+if task_type != "regression" and task_type != "multilabel_classification" and imbalance_strategy in ("smote", "smote_tomek"):
+    if imbalance_strategy == "smote":
+        # Guard: SMOTE needs k_neighbors < minority class count
+        # If minority is too small (< 6), fall back to class_weight
+        try:
+            minority_count = int(pd.Series(y).value_counts().min())
+            if minority_count < 6:
+                resampler = "fallback_class_weight"
+            else:
+                resampler = SMOTE(k_neighbors=min(5, minority_count - 1), random_state=42)
+        except Exception:
+            resampler = "fallback_class_weight"
+    else:  # smote_tomek
+        try:
+            minority_count = int(pd.Series(y).value_counts().min())
+            if minority_count < 6:
+                resampler = "fallback_class_weight"
+            else:
+                resampler = SMOTETomek(random_state=42)
+        except Exception:
+            resampler = "fallback_class_weight"
+
+    # Training pipeline with resampler (for downstream CV use)
+    if resampler != "fallback_class_weight":
+        training_pipeline = ImbPipeline([
+            ("prep", preprocessor),
+            ("resample", resampler),
+        ])
+        # Save training pipeline for reference (not used for inference)
+        training_pipeline_path = os.path.join(artifacts_dir, "training_pipeline.pkl")
+        joblib.dump(training_pipeline, training_pipeline_path)
+    else:
+        # Fallback: use preprocessor only, class_weight handled by model
+        training_pipeline_path = ""
+else:
+    training_pipeline_path = ""
+
+# Save processed dataset for next agents (preprocessed ONLY, no resampling)
+# Downstream agents will use training_pipeline for CV if it exists
 feature_names = preprocessor.get_feature_names_out().tolist() if hasattr(preprocessor, "get_feature_names_out") else [f"f_{{i}}" for i in range(X_transformed.shape[1])]
 df_processed = pd.DataFrame(X_transformed, columns=feature_names)
-df_processed["__target__"] = y.values
+
+# For multilabel, store the BINARIZED matrix rows (fixed-width 0/1 vectors) as JSON —
+# NOT the variable-length label-name lists, which np.array() can't stack into a 2-D
+# array downstream. The saved MultiLabelBinarizer maps positions back to label names.
+if task_type == "multilabel_classification":
+    df_processed["__target__"] = [json.dumps([int(v) for v in row]) for row in y]
+else:
+    df_processed["__target__"] = y.values
+
 processed_path = os.path.join(artifacts_dir, "processed.csv")
 df_processed.to_csv(processed_path, index=False)
 
 RESULT = {{
     "preprocessor_path": preprocessor_path,
+    "training_pipeline_path": training_pipeline_path,
     "processed_path": processed_path,
     "n_features_out": X_transformed.shape[1],
     "n_samples": X_transformed.shape[0],
@@ -205,6 +315,11 @@ RESULT = {{
     "dropped_columns": drop_existing,
     "datetime_cols_expanded": datetime_cols,
     "target_classes": target_classes,
+    "imbalance_strategy": imbalance_strategy,
+    "resampler_used": "smote" if imbalance_strategy == "smote" else ("smote_tomek" if imbalance_strategy == "smote_tomek" else "none"),
+    "multilabel_binarizer_path": multilabel_binarizer_path,
+    "label_columns": label_columns,
+    "label_delimiter": label_delimiter,
 }}
 '''
 
@@ -250,6 +365,7 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
         encoding = response.get("encoding_strategy", {})
         scaling = response.get("scaling_strategy", "standard")
         handle_imbalance = response.get("handle_imbalance", False)
+        imbalance_strategy = response.get("imbalance_strategy", "none")
 
         # Infer default imputer for numeric cols
         skewed = {k: v for k, v in eda.get("skewness", {}).items() if abs(v) > 0.5}
@@ -268,6 +384,9 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
                 num_imputer_default=num_imputer_default,
                 encoding_strategy=repr(p["encoding"]),
                 scaling_strategy=p["scaling"],
+                imbalance_strategy=p["imbalance_strategy"],
+                label_columns=repr(state.get("label_columns", [])),
+                label_delimiter=state.get("label_delimiter", ""),
             )
 
         repairable = {
@@ -275,6 +394,7 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
             "imputation": imputation,
             "encoding": encoding,
             "scaling": scaling,
+            "imbalance_strategy": imbalance_strategy,
         }
         result = await self.execute_code_with_repair(
             run_id, render, repairable,
@@ -288,8 +408,26 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
             timeout=180,
         )
         if not result["success"]:
-            await self._mark_step(run_id, "failed", result["error"])
-            return {"error": f"Preprocessing failed: {result['error']}", "status": "failed"}
+            # E3: template + param-repair exhausted → let the agent WRITE its own fix.
+            eda = state.get("eda_insights", {})
+            tags = ["preprocessor"]
+            if eda.get("text_cols"): tags.append("has_text")
+            if eda.get("datetime_cols"): tags.append("has_datetime")
+            if state.get("task_type") == "multilabel_classification": tags.append("multilabel")
+            failed_code = render(result.get("final_params", repairable))
+            agentic = await self.execute_code_agentic(
+                run_id, failed_code, result["error"], agent_role="preprocessor",
+                task_type=state.get("task_type", "unknown"), tags=tags,
+                goal=("Preprocess dataset_path into processed.csv (features + a '__target__' column) "
+                      "and save a fitted sklearn preprocessor to artifacts_dir/preprocessor.pkl."),
+                result_keys=["preprocessor_path", "processed_path", "n_features_out",
+                             "n_samples", "dropped_columns"],
+                timeout=180,
+            )
+            if not agentic["success"]:
+                await self._mark_step(run_id, "failed", agentic["error"])
+                return {"error": f"Preprocessing failed: {agentic['error']}", "status": "failed"}
+            result = agentic
 
         # Adopt any repaired params so downstream logging reflects what actually ran
         final_params = result.get("final_params", repairable)
@@ -313,12 +451,14 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
             "scaling_strategy": scaling,
             "n_features_after_preprocessing": data["n_features_out"],
             "handle_imbalance": handle_imbalance,
+            "imbalance_strategy": data.get("imbalance_strategy", "none"),
+            "resampler_used": data.get("resampler_used", "none"),
         })
 
         await self.emit(
             run_id,
-            f"Preprocessing complete: {data['n_samples']} samples × {data['n_features_out']} features",
-            {"n_features": data["n_features_out"], "dropped_columns": data["dropped_columns"]},
+            f"Preprocessing complete: {data['n_samples']} samples × {data['n_features_out']} features (imbalance: {data.get('imbalance_strategy', 'none')})",
+            {"n_features": data["n_features_out"], "dropped_columns": data["dropped_columns"], "imbalance_strategy": data.get("imbalance_strategy", "none")},
         )
         await self._mark_step(run_id, "completed")
 
@@ -338,6 +478,8 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
                 "datetime_cols_expanded": data.get("datetime_cols_expanded", []),
                 "scaling_strategy": scaling,
                 "handle_imbalance": handle_imbalance,
+                "imbalance_strategy": data.get("imbalance_strategy", "none"),
+                "resampler_used": data.get("resampler_used", "none"),
                 "per_column_decisions": [
                     {"column": d.get("column"), "strategy": d.get("strategy"),
                      "reasoning": d.get("reasoning", "")[:100]}
@@ -347,9 +489,16 @@ Use RobustScaler if significant outliers detected. Use median imputation for ske
         }
         return {
             "preprocessor_path": data["preprocessor_path"],
+            "training_pipeline_path": data.get("training_pipeline_path", ""),
             "preprocessing_decisions": decisions,
             "processed_data_path": data["processed_path"],
             "target_classes": data.get("target_classes", []),
+            # imbalance_strategy must reach model_selector/tuner/feature_engineer (Phase C)
+            "imbalance_strategy": data.get("imbalance_strategy", "none"),
+            "resampler_used": data.get("resampler_used", "none"),
+            "multilabel_binarizer_path": data.get("multilabel_binarizer_path", ""),
+            "label_columns": data.get("label_columns", []),
+            "label_delimiter": data.get("label_delimiter", ""),
             "decision_log": existing_log + decision_log_entries,
             "notebook_cells": existing_cells + [new_cell],
         }

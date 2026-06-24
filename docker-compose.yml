@@ -19,28 +19,75 @@ services:
         condition: service_started
       mlflow:
         condition: service_started
+    # `default` for postgres/redis/mlflow + LLM internet egress; `sandbox_net`
+    # to reach the (internet-isolated) sandbox.
+    networks:
+      - default
+      - sandbox_net
     restart: unless-stopped
 
   sandbox:
     build:
       context: ./sandbox
       dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
+    # SECURITY (Phase 1): the sandbox executes untrusted / LLM-written code.
+    # No host port — reachable ONLY by the backend over an internal network with
+    # no internet egress. Capabilities dropped, privilege escalation blocked,
+    # PID count capped (fork-bomb guard). Per-execution process isolation +
+    # hard-kill timeout live in sandbox/main.py.
+    networks:
+      - sandbox_net
     volumes:
       - data_volume:/data
     environment:
       - DATA_DIR=/data
+      - PYTHONDONTWRITEBYTECODE=1
+      - HOME=/tmp
+      - MPLCONFIGDIR=/tmp/mpl        # matplotlib needs a writable config dir
+    cap_drop:
+      - ALL                           # generated code gets no Linux capabilities
+    security_opt:
+      - no-new-privileges:true        # block setuid-based escalation
+    # Opt-in stricter hardening — enable one at a time and live-verify (these can
+    # break libs that need a writable FS / the shared volume's ownership):
+    #   read_only: true
+    #   tmpfs: ["/tmp"]
+    #   user: "1000:1000"            # requires the /data volume to be uid-1000 writable
     deploy:
       resources:
         limits:
           cpus: "2.0"
           memory: 4G
+          pids: 256                   # contain fork bombs from generated code
         reservations:
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    restart: unless-stopped
+
+  # Phase 4 (opt-in): durable run worker. Only starts with `--profile worker`
+  # AND USE_JOB_QUEUE=true in .env — otherwise the API runs pipelines in-process.
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: arq app.worker.WorkerSettings
+    env_file: .env
+    volumes:
+      - data_volume:/data
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      sandbox:
+        condition: service_started
+    networks:
+      - default
+      - sandbox_net
     restart: unless-stopped
 
   postgres:
@@ -113,10 +160,11 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=automl
+      # Override these in .env for any shared/hosted deployment.
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-automl}
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ENABLED=${GRAFANA_ANON_ENABLED:-true}
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - grafana_data:/var/lib/grafana
@@ -142,6 +190,13 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+networks:
+  # Internet-isolated network for the code-execution sandbox. `internal: true`
+  # blocks all egress; only containers attached here (backend + sandbox) can
+  # talk to it. The backend also stays on `default` for DB/cache/LLM access.
+  sandbox_net:
+    internal: true
 
 volumes:
   postgres_data:

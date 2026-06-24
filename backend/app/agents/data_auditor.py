@@ -25,12 +25,37 @@ for col, stats in describe_raw.items():
 # Target distribution (filled after ProblemFramer sets target_column)
 target_col = target_column  # injected into globals by orchestrator
 target_dist = {}
+imbalance_severity = "none"
 if target_col and target_col in df.columns:
     vc = df[target_col].value_counts(normalize=True).round(4)
     target_dist = vc.to_dict()
+    # Class imbalance severity: "severe" if minority class < 5% (ratio > 20:1)
+    if len(vc) >= 2:
+        minority_pct = float(vc.min() * 100)
+        if minority_pct < 5.0:
+            imbalance_severity = "severe"
+        elif minority_pct < 20.0:
+            imbalance_severity = "moderate"
 
 # Cardinality
 cardinality = df.nunique().to_dict()
+
+# Wrong-Door Guard sensor: detect time-series structure. If a column parses as a
+# monotonic-increasing datetime, the rows are time-ordered — running them through
+# the tabular pipeline's random K-fold CV yields credible-but-INVALID scores
+# (future leaks into training). We flag it so run() can warn the user toward the
+# Time-Series studio. Detection only; never blocks.
+temporal_signal = {}
+try:
+    for c in df.columns:
+        lc = c.lower()
+        if any(tok in lc for tok in ("date", "time", "timestamp", "year", "month")) or c.lower() == "dt":
+            parsed = pd.to_datetime(df[c], errors="coerce")
+            if parsed.notna().mean() > 0.9 and parsed.is_monotonic_increasing and df.shape[0] > 20:
+                temporal_signal = {"column": c, "monotonic": True}
+                break
+except Exception:
+    temporal_signal = {}
 
 # Sample rows (5 only)
 sample = df.sample(min(5, len(df)), random_state=42).to_dict(orient='records')
@@ -43,6 +68,8 @@ RESULT = {
     "describe": describe_clean,
     "cardinality": cardinality,
     "target_distribution": target_dist,
+    "imbalance_severity": imbalance_severity,
+    "temporal_signal": temporal_signal,
     "sample_rows": sample,
     "memory_mb": round(df.memory_usage(deep=True).sum() / 1024 / 1024, 2),
 }
@@ -61,7 +88,12 @@ You MUST respond with valid JSON:
 verdict rules:
 - "usable": data looks clean enough, proceed
 - "warn": issues found but pipeline can continue (warn user)
-- "abort": data is fundamentally broken (e.g. <50 rows, target column missing, >80% nulls in target)
+- "abort": data is fundamentally broken — ONLY for: fewer than ~30 rows, zero usable
+  feature columns, or a completely empty/corrupt file.
+
+CRITICAL: The target column and task type are decided by a LATER step, not here.
+They are intentionally blank at audit time. NEVER abort or warn about a "missing
+target" or "unspecified task type" — that is expected and not a data problem.
 """
 
 
@@ -79,6 +111,12 @@ class DataAuditorAgent(BaseAgent):
         code = f'target_column = "{target_col_value}"\n' + PROFILING_CODE
 
         sandbox_result = await self.execute_code(code, run_id, timeout=60)
+        sandbox_result = await self.try_agentic_repair(
+            run_id, code, sandbox_result,
+            result_keys=["shape", "memory_mb", "null_pct", "cardinality"],
+            goal=("Profile the CSV at dataset_path: set RESULT with shape ([rows, cols]), "
+                  "memory_mb (float), null_pct ({col: pct}), and cardinality ({col: n_unique})."),
+        )
         if not sandbox_result["success"]:
             await self._mark_step(run_id, "failed", sandbox_result["error"])
             return {"error": f"Data profiling failed: {sandbox_result['error']}", "status": "failed"}
@@ -87,21 +125,33 @@ class DataAuditorAgent(BaseAgent):
 
         import json
         user_message = f"""
-Dataset profile:
+Dataset profile (assess DATA QUALITY only — target & task are chosen later):
 - Shape: {profile['shape']}
 - Memory: {profile['memory_mb']} MB
-- Target column: {state.get('target_column')}
-- Target distribution: {json.dumps(profile.get('target_distribution', {}))}
 - Null percentages (top 10 worst): {json.dumps(dict(sorted(profile['null_pct'].items(), key=lambda x: -x[1])[:10]))}
 - Cardinality (top 10): {json.dumps(dict(sorted(profile['cardinality'].items(), key=lambda x: -x[1])[:10]))}
 - Sample rows: {json.dumps(profile.get('sample_rows', [])[:3])}
 
-Task type: {state.get('task_type')}
+Target column and task type: not yet assigned (a later step decides these — do NOT treat as a problem).
 """
         response = await self.llm.complete_json(SYSTEM_PROMPT, user_message)
 
         verdict = response.get("verdict", "warn")
         warnings = response.get("warnings", [])
+
+        # Wrong-Door Guard: time-ordered data in the tabular pipeline → warn (never block).
+        # If the user is already in the time-series studio, this is expected; stay quiet.
+        wrong_door_warning = ""
+        ts = profile.get("temporal_signal") or {}
+        if ts.get("monotonic") and state.get("pipeline", "tabular") != "timeseries":
+            wrong_door_warning = (
+                f"Column '{ts.get('column')}' looks time-ordered. The tabular pipeline uses "
+                f"random cross-validation, which can OVERSTATE performance on time-series data "
+                f"(the future leaks into training). For forecasting/quant tasks, use the "
+                f"Time-Series studio (temporal/walk-forward validation)."
+            )
+            warnings = [wrong_door_warning, *warnings]
+            await self.emit(run_id, "⚠ Time-ordered data detected in tabular mode", {"wrong_door": True})
 
         decision_log_entries = []
         for d in response.get("decisions", []):
@@ -145,6 +195,7 @@ Task type: {state.get('task_type')}
                     sorted(profile["null_pct"].items(), key=lambda x: -x[1])[:5]
                 ),
                 "target_distribution": profile.get("target_distribution", {}),
+                "imbalance_severity": profile.get("imbalance_severity", "none"),
                 "cardinality_top5": dict(
                     sorted(profile["cardinality"].items(), key=lambda x: -x[1])[:5]
                 ),
@@ -154,6 +205,8 @@ Task type: {state.get('task_type')}
         return {
             "data_audit": profile,
             "audit_verdict": verdict,
+            "imbalance_severity": profile.get("imbalance_severity", "none"),
+            "wrong_door_warning": wrong_door_warning,
             "decision_log": existing_log + decision_log_entries,
             "notebook_cells": existing_cells + [new_cell],
         }

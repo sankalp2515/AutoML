@@ -14,11 +14,13 @@ class SandboxExecutor:
         code: str,
         run_id: str,
         timeout: int = settings.SANDBOX_TIMEOUT,
+        restricted: bool = False,
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=timeout + 10) as client:
             response = await client.post(
                 f"{self.base_url}/execute",
-                json={"code": code, "run_id": run_id, "timeout": timeout},
+                json={"code": code, "run_id": run_id, "timeout": timeout,
+                      "restricted": restricted},
             )
             response.raise_for_status()
             return response.json()

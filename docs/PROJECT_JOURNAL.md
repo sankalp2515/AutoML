@@ -3,7 +3,367 @@
 > **Living document.** Updated alongside every feature, fix, and architecture change.
 > Read this top-to-bottom and you understand the entire project without opening code.
 
-Last updated: **2026-06-13** (Tier-1 self-repair micro-loop + pip-extras baked into image)
+Last updated: **2026-06-19** (Bug fixes from live QA + LLM cooldown + guardrails + Supabase auth backend)
+
+### Phase 5 — live-QA fixes, reliability, guardrails, auth (2026-06-19)
+From the user's first live test pass.
+- **Bug: arq worker crash** (`'staticmethod' object has no attribute 'host'`) — `WorkerSettings.redis_settings`
+  must be a `RedisSettings` INSTANCE, not a method. Fixed in `app/worker.py`.
+- **Bug: pytest collection** `FileNotFoundError /sandbox/main.py` in the backend container — the sandbox
+  source isn't mounted there. `test_screen.py` now `pytest.skip(allow_module_level=True)` when absent.
+- **Bug/latency: LLM fallback storm** (the likely cause of "2nd concurrent run didn't finish") — every
+  agent re-tried Groq (2 retries + Retry-After) THEN fell back, per agent, exhausting the free TPM budget
+  and serializing concurrent runs. **Fixed:** process-wide provider **cooldown circuit-breaker** in
+  `core/llm.py` — a 429 cools that provider (Retry-After or 60s) so all subsequent agents/runs skip
+  straight to the fallback; if all providers are cooling, wait once for the soonest. `test_llm_cooldown.py`.
+  **User action still recommended:** add a free `GEMINI_API_KEY` so the cooldown has a fallback with headroom.
+- **Guardrails** `core/guardrails.py`: `sanitize_user_goal` (strip control chars, collapse ws, cap 2000 —
+  wired into create_run) and `validate_and_fix_framing` (clamps LLM framing: invalid task→binary, metric
+  not-valid-for-task→registry default, threshold→[0,1], flags missing target) — wired into problem_framer.
+  Prevents a bad LLM decision from crashing/NaN-ing a scorer downstream. `test_guardrails.py`.
+- **Supabase auth (backend)** `core/auth.py`: opt-in `SUPABASE_JWT_SECRET` → verify `Authorization: Bearer`
+  access tokens (HS256, signature+exp+audience), map user `sub` → tenant `user:<uuid>`; integrated into
+  `current_tenant` + `enforce_run_ownership` alongside the API-key path. pyjwt added. `test_supabase_auth.py`
+  (6 tests: valid/expired/wrong-secret/wrong-aud/missing/disabled — all pass).
+- **Supabase auth (frontend, UNVERIFIED — needs your project + npm i):** `frontend/lib/supabase.ts`,
+  `app/login/page.tsx`, token attached at the `apiRequest` choke point, `@supabase/supabase-js` in package.json.
+- **Production audit** `docs/PRODUCTION_AUDIT.md` — full severity/status table; top open items: real SECRET_KEY
+  + secrets manager, move inference `eval` into the sandbox, add fallback LLM key, CI integration harness,
+  dataset retention/encryption, Grafana creds.
+### Phase 5.1 — audit fixes + CI integration harness (2026-06-19)
+- **CI INTEGRATION HARNESS** `tests/test_integration/test_pipeline_graph.py` — drives the REAL compiled
+  LangGraph end-to-end with each agent's run() stubbed (no LLM/sandbox/DB). Asserts: agent order +
+  data_splitter sits between framer and baseline; **fail-fast** (a failed agent routes to END, no zombie
+  cascade); **significance gate** stops iteration when gain < score_std; **iteration cap** terminates the
+  loop. Closes the long-standing "no end-to-end test of the orchestration" gap. 4 tests.
+- **Audit fixes (code, verifiable):** `MAX_RUN_SECONDS` wall-clock budget wraps `graph.ainvoke` (R6);
+  `MAX_DATASET_COLUMNS` guard rejects absurdly wide CSVs at upload (D3); CORS origins now
+  `CORS_ALLOW_ORIGINS` env (S8); Grafana creds/anon now env-driven (`GRAFANA_USER/PASSWORD/ANON_ENABLED`)
+  (O2); startup warning if `SECRET_KEY` is the default in non-DEBUG (S4).
+- **Audit correction:** S6 was WRONG — the inference `eval()` runs INSIDE the sandbox template
+  (`PREDICT_CODE`) within the isolated container, not the backend. Marked not-a-bug.
+- **QA doc fixed for Windows cmd:** replaced Linux heredoc + in-container `curl` (backend image has no curl)
+  with `python -c` one-liners; added `psql -P pager=off` (the `--More--` you hit).
+- **Verified (unit): 117 backend tests pass.**
+
+### Phase 5 — live-QA fixes, reliability, guardrails, auth (2026-06-19)
+- **Honest limit:** I cannot run Docker/the live stack
+  in my environment, so live end-to-end QA remains the user's (see docs/QA_TEST_PLAN.md); these fixes are
+  unit-proven + reasoned, and the cooldown directly targets the observed concurrent-run failure.
+
+### Phase 4 — Multi-tenant production foundation (2026-06-18)
+
+### Phase 4 — Multi-tenant production foundation (2026-06-18)
+Toward the revenue product. Safe-by-default: with no tenant keys configured, behavior is identical
+to before (single "public" tenant). Pieces needing live infra are OPT-IN so they can't break the app.
+- **Auth + tenancy** `core/auth.py`: `TENANT_API_KEYS` (JSON api-key→tenant) drives `resolve_tenant`,
+  the `current_tenant` dependency (401 on bad/missing key in tenant mode), and `enforce_run_ownership`
+  — a single ROUTER-LEVEL dependency applied to all run-scoped routers in main.py, so every endpoint
+  is covered with no per-endpoint hole (cross-tenant access → 404). Empty keys = "public" mode = no-op.
+- **Tenant column**: `Run.tenant_id` (indexed, default "public"); Alembic `0002_tenant_id`. create_run
+  stamps the caller's tenant; list_runs filters by it; child tables authorize via their run.
+- **Quota**: `QUOTA_MAX_ACTIVE_RUNS_PER_TENANT` (0=unlimited) — create_run 429s when the tenant's
+  queued+running count hits the cap.
+- **Durable job queue (opt-in)** `core/job_queue.submit_run()`: default = in-process background task
+  (unchanged); `USE_JOB_QUEUE=true` → enqueue to **arq** (Redis) processed by `app/worker.py`
+  (`arq app.worker.WorkerSettings`). Compose `worker` service gated behind `profiles: [worker]` so a
+  normal `docker compose up` never starts it. Enqueue fails safe (falls back to inline) so a run is
+  never stranded. arq added to requirements.
+- **Data isolation**: run_id is an unguessable UUID and access is tenant-authorized, so artifacts stay
+  at /data/{run_id}; physical per-tenant namespacing of the path is a documented future hardening.
+- **Verified (unit): full suite green** — new `test_tenancy.py` (public-mode default, key resolution,
+  malformed-map ignored, cross-tenant query isolation, quota counts only active); existing API tests
+  updated to the new `submit_run` seam.
+- **DEFERRED (genuinely need live infra / ops, documented):** persistent inference server (kills ~1s
+  predict latency); HTTPS/TLS (reverse-proxy/ingress concern, not app code); the OpenML CI
+  integration harness (in-process executor + deterministic LLM mocks — high-value next build).
+- **NEEDS LIVE VERIFICATION (offloaded):** run `alembic upgrade head` (applies 0002); confirm normal
+  single-tenant runs unchanged; with `TENANT_API_KEYS` set, tenant A cannot GET tenant B's run (404);
+  with `USE_JOB_QUEUE=true` + `--profile worker`, runs execute via the worker and survive an API restart.
+
+### Phase 3 — De-hardcode audit + dynamic doctrine (2026-06-18)
+
+### Phase 3 — De-hardcode audit + dynamic doctrine (2026-06-18)
+Instruction #1 ("no predefining under prompts, everything dynamic") realized per the agreed doctrine
+(LLM owns ML *decisions*; code owns contracts/mechanics/rails).
+- **Doctrine doc** `docs/analysis/11-dynamic-doctrine.md` — authoritative classification table
+  (decision vs mechanic vs guardrail); supersedes the now-stale "what's hardcoded" list in doc 01.
+- **Metric registry** `core/metric_registry.py` — single source of truth for metric → sklearn scorer
+  (incl. the multiclass remap), per-task allowed menu, defaults, higher_is_better. Mirrors model_registry.
+- **Framer prompt is now registry-DERIVED**: the 13-metric vocabulary + per-task menu are generated
+  from `metric_registry` (`all_metrics()` / `framer_menu_text()`), not hand-typed. Adding a metric =
+  one registry line, no prompt edit. Selection heuristics (fraud→recall, etc.) kept as LLM *guidance*.
+- **baseline_builder** now resolves its scorer via `metric_registry.sklearn_scorer()` — deleted ~25
+  lines of duplicated scoring_map + multiclass-remap dicts. Parity-tested (identical behavior).
+- **Honesty fix**: homepage pillar copy no longer falsely claims "No templates, no fixed recipes" —
+  now describes template-first execution with agent-written fixes on edge cases (the long-pending debt).
+- **Tracked residual:** the scoring maps INSIDE the feature_engineer/evaluator/model_selector/tuner
+  sandbox *templates* still inline the mapping (they execute in the sandbox); parity-covered by tests,
+  migrate to a registry-rendered token later.
+- **Verified (unit): full suite green** — new `test_metric_registry.py` proves scorer parity with the
+  old baseline map + that the framer prompt is registry-derived; `test_prompts`/`test_templates` pass.
+
+### Phase 2 — Universal agentic self-repair (2026-06-18)
+
+### Phase 2 — Universal agentic self-repair (2026-06-18)
+User requirement: no agent should die on a template error — the failing agent must WRITE its own fix.
+Now safe because Phase 1 made the sandbox a real boundary (generated code runs restricted, inside the jail).
+- **Uniform helper** `BaseAgent.try_agentic_repair(run_id, code, failed_result, *, result_keys, goal,
+  task_type, tags, timeout)`: a NO-OP when the result already succeeded (happy path = zero LLM cost),
+  else delegates to the existing `execute_code_agentic` (cookbook-seeded, restricted sandbox, retries,
+  validates RESULT keys, records the working fix).
+- **Wired into every template-running agent** (template-first, agentic fallback): data_auditor,
+  eda_agent, baseline_builder, model_selector (after its Tier-1 param-revision exhausts), tuner,
+  evaluator, exporter — plus TS: ts_auditor, ts_feature_builder, ts_modeler. (preprocessor +
+  feature_engineer already had it.) Each passes the minimal `result_keys` its run() actually consumes
+  + a goal describing the artifacts to produce.
+- **TS leakage guard:** the agentic goals for ts_feature_builder / ts_modeler FORCEFULLY mandate
+  strictly-backward-looking features and TimeSeriesSplit/walk-forward/temporal-holdout ONLY (never
+  random KFold) — a free-form LLM rewrite must not silently reintroduce look-ahead leakage.
+- **Note:** the agentic path is `restricted=True`, whose whitelist excludes matplotlib/seaborn/shap,
+  so a self-written fix may skip optional PLOTS — `result_keys` never require plots, only the data the
+  pipeline needs, so recovery still advances the run.
+- **Verified (unit): 68 backend tests pass** (was 65): new `test_agentic_fallback.py` proves the
+  success no-op (no LLM call) + correct delegation args; `test_state_contract` confirms the wiring
+  added no undeclared return keys.
+- **NEEDS LIVE VERIFICATION (offloaded):** (1) normal runs still complete unchanged (happy path);
+  (2) ideally inject a template fault in one agent and confirm it self-repairs and the run continues;
+  (3) for a TS run that triggers repair, confirm the generated code used temporal validation (no leakage).
+
+### Phase 1 — Real sandbox boundary (2026-06-18)
+
+### Phase 1 — Real sandbox boundary (2026-06-18)
+The sandbox executes untrusted/LLM-written code; Phase 2 makes that the norm, so the boundary
+had to become real BEFORE generalizing agentic-repair.
+- **Boundary model decided:** the CONTAINER is the primary boundary; the in-process AST screen +
+  restricted builtins are secondary defense for generated code. Consequence: vetted TEMPLATES keep
+  running with full builtins (`restricted=False`) INSIDE the jail — so the planned high-risk rewrite
+  of all 7 templates to `restricted=True` was **avoided** (it would have destabilized verified code
+  and needed matplotlib/seaborn/shap whitelisting + an os-replacement shim). Generated code stays
+  `restricted=True`.
+- **1.2 Process isolation (also the 0.3 deferral)** — `sandbox/main.py` rewritten: each `/execute`
+  runs in a dedicated **spawn** child process (spawn, never fork → kills the documented fork-deadlock
+  class). Parent enforces a HARD wall-clock timeout via `join`+`terminate`/`kill`; a runaway loop,
+  segfault, or OOM kills only the child, service stays up. `signal.alarm` removed entirely (was
+  main-thread-only) → cross-platform + thread-safe. Exec runs via `run_in_executor` so the event loop
+  (and `/health`) stays responsive and independent executions can run concurrently. AST screen
+  hardened (locals/breakpoint/help/classmethod/staticmethod added to the banned set).
+- **1.1 Container hardening (`docker-compose.yml`)** — new `sandbox_net` with `internal: true` (no
+  internet egress); sandbox host port REMOVED (reachable only by backend via internal DNS
+  `sandbox:8001`); `cap_drop: [ALL]`, `security_opt: [no-new-privileges]`, `pids_limit: 256`
+  (fork-bomb guard); env for writable matplotlib/home + no-pyc. Backend joined to `default` +
+  `sandbox_net` (keeps DB/cache/MLflow + LLM internet). `read_only` / `tmpfs` / non-root `user` left
+  as **commented opt-ins** to enable+verify one at a time (FS-write/volume-ownership breakage risk).
+- **Verified (local, Windows-spawn): process isolation works** — normal run OK; infinite loop
+  HARD-KILLED at the timeout; crash survived; restricted screen blocks os/eval. **65 backend tests
+  pass** (was 48): +17 AST-screen/exec tests (`test_sandbox/test_screen.py`).
+- **NEEDS LIVE VERIFICATION (offloaded — Docker/GPU):** `docker compose up -d` boots; backend↔sandbox
+  reachable; **sandbox has NO internet** (`docker compose exec sandbox python -c "import urllib.request,sys; urllib.request.urlopen('https://example.com',timeout=5)"` should FAIL); a full pipeline run still
+  completes (GPU XGBoost + matplotlib plots write OK under cap_drop); confirm `/health` responds during
+  a long exec. If matplotlib/GPU breaks, the env vars or cap_drop are the suspects (rollback notes in compose).
+
+### Phase 0.2–0.5 — honest evaluation + safety + hygiene (2026-06-18)
+
+### Phase 0.2–0.5 — honest evaluation + safety + hygiene (2026-06-18)
+**0.2 True holdout (the big one — reported scores will now DROP, correctly).**
+- Root cause: the evaluator's old 20% "holdout" had already leaked into feature selection,
+  model selection, and tuning (all ran on the full dataset) → reported `final_score` was the
+  selection CV (user-confirmed), i.e. optimistic.
+- Fix: new `data_splitter` agent runs after problem_framer, BEFORE any fit/select/tune. It
+  physically carves `train.csv` + `holdout.csv` from raw data and repoints `dataset_path` →
+  **every upstream agent becomes train-only with ZERO template changes** (they all read
+  `dataset_path`). Stratified for single-label classification; random otherwise; skipped (CV
+  fallback) under 60 rows. Time-series uses its own graph and never hits this node.
+- Evaluator rewritten (surgically): scores the untouched holdout by reproducing the EXACT
+  inference transform (`api/routes/inference.py`: align → preprocessor.transform → engineered
+  formulas from raw cols → reindex to trained columns), fits on ALL train, no refit-on-subset.
+  Wrapped in try/except → on any failure degrades to the legacy in-sample split and sets
+  `evaluation_basis="in_sample_split"` (never breaks a run). Reuses the verified per-task
+  metrics block unchanged. Handles regression/binary/multiclass/multilabel(labelcols+delimiter).
+- Significance-gated iteration: evaluator computes `score_std` (3-fold CV std on train);
+  `route_after_evaluator` now requires improvement ≥ max(IMPROVEMENT_THRESHOLD, score_std) —
+  a gain within fold noise no longer triggers another (overfitting) iteration.
+- New state: `holdout_path`, `holdout_frac`, `evaluation_basis`, `score_std`.
+- Residual debt (documented, smaller): binary threshold is still picked on the holdout (affects
+  only reported recall/precision@threshold, NOT the headline final_score) — clean up later.
+**0.3 Sandbox single-flight lock.** Added an `asyncio.Lock` around `/execute` so overlapping
+  requests can't stomp the shared `signal.alarm` timer. NOTE: the full signal.alarm→worker-PROCESS
+  rewrite (true parallelism + non-loop-blocking timeout) is **deliberately deferred to Phase 1**,
+  where the sandbox container is rebuilt (non-root, network=none) and live GPU-verified together —
+  doing it blind now (documented past multiprocessing-deadlock + GPU re-init) would risk breakage.
+**0.4 Alembic adopted.** `backend/alembic/` + `alembic.ini`, sync engine off `DATABASE_URL_SYNC`,
+  `Base.metadata` wired for autogenerate, no-op `0001_baseline`. `create_all` kept for fresh DBs.
+  Workflow + one-time `alembic stamp` adoption in `docs/MIGRATIONS.md`. No more hand-run ALTER TABLE.
+**0.5 Hygiene.** Deleted tracked `frontend-backup-phase3/`; untracked 96 `.pyc`/`__pycache__` +
+  `tsbuildinfo`; real `.gitignore`. (Changes staged, NOT committed — awaiting user.)
+- **Verified (unit, no network): 48 backend tests pass** (was 41): added holdout-transform template
+  renders (incl. multilabel), splitter template, and 5 significance-gate routing tests.
+- **NEEDS LIVE VERIFICATION (offloaded to user — checklist provided):** run Iris/Titanic/regression/
+  imbalanced/multilabel end-to-end; confirm `evaluation_basis="holdout"` and holdout final_score ≤ old
+  CV score (expected drop). If any task logs `HOLDOUT_FALLBACK`, capture the repr for follow-up.
+
+### Phase 0.1 — Request-scoped context: concurrency attribution race FIXED (2026-06-18)
+
+### Phase 0.1 — Request-scoped context: concurrency attribution race FIXED (2026-06-18)
+Part of the strict-review production-hardening plan (P0→P1→P2; target = multi-tenant hosted product).
+- **Bug:** run/agent attribution was stored as *mutable attributes on singletons* —
+  `llm._current_agent`/`_current_run_id` (the process-global `LLMClient`) and
+  `BaseAgent._agent_start_time`. Two concurrent runs clobbered each other → LLM cost/token
+  attribution logged against the wrong run, corrupted durations, cross-contaminated decision
+  logs. Directly undermines the "every decision is auditable" value prop. The multi-tenant blocker.
+- **Fix:** new `app/core/context.py` holds `contextvars` (`run_id`, `agent_name`, `agent_start`).
+  contextvars are copied per asyncio task, and each pipeline run is its own `graph.ainvoke` task,
+  so concurrent runs are isolated with zero cross-talk. Bound once in `BaseAgent._mark_step("running")`;
+  read in `LLMClient._record` + the rate-limit/fallback log lines. Removed all singleton `_current_*`
+  / `_agent_start_time` state.
+- **Doctrine note:** this is a *mechanic/rail*, not an ML decision — stays in code.
+- **Verified (unit, no network):** new `tests/test_context.py` proves isolation across interleaved
+  concurrent tasks + safe defaults outside a run. **41 backend tests pass** (was 39).
+- **Next in P0:** 0.2 held-out/nested-CV scoring + significance-gated iteration (selection-CV is
+  optimistic, confirmed); 0.3 process-isolated sandbox exec (replace signal.alarm); 0.4 Alembic;
+  0.5 delete tracked `frontend-backup-phase3/`.
+
+
+### Phase 3.8 — Imbalanced (P18) + Multilabel (P19) finished & stabilized (2026-06-16)
+- **AgentState contract** fixed: added `imbalance_strategy`, `training_pipeline_path`,
+  `multilabel_binarizer_path`, `resampler_used` (LangGraph silently drops undeclared keys).
+- **feature_engineer** multilabel-safe (ast target parse, KFold + MultiOutputClassifier, multilabel scoring).
+- **In-fold SMOTE/SMOTE-Tomek** in model_selector/tuner/feature_engineer via `_cv_estimator()`
+  (imblearn Pipeline, in-fold only; `<6` minority → class_weight fallback); tuner final-fit resamples full data.
+- **Exporter + inference** carry `task_type` + `multilabel_binarizer`; predict decodes multilabel → label SET;
+  PredictionLog stores lists as JSON; frontend renders label chips (`Prediction.prediction: string|string[]`).
+- **Critical fix**: in-progress rewrite broke tuner+evaluator templates (abandoned brace-doubling →
+  `.format()` crashed EVERY run). Converted both to exporter `.replace("__TOKEN__", repr())` pattern.
+- **New guards** (static, no network): `test_state_contract.py` (agent run() keys ⊆ AgentState) +
+  extended `test_templates.py` (format vs token render styles + multilabel case).
+- **DB migration gotcha**: `Run.pipeline` is a new column; `create_all` won't ALTER an existing table →
+  POST /runs 500s until `ALTER TABLE runs ADD COLUMN pipeline VARCHAR(20) DEFAULT 'tabular'` is run.
+- **Verified: 34 backend tests pass, tsc clean**; live multilabel/imbalanced/tabular runs executed for confirmation.
+
+### Phase 4.0 — Time-Series studio BUILT & live-verified (2026-06-16)
+Full working forecasting pipeline (P3 + core P4), separate graph on shared chassis:
+- Agents (`app/agents/ts_agents.py`): **ts_framer** (timestamp/target/horizon/freq/metric) →
+  **ts_auditor** (ordering/frequency/gaps/min-length) → **ts_feature_builder** (lags 1-7,
+  shifted rolling mean/std, calendar — strictly backward-looking) → **ts_modeler**
+  (walk-forward `TimeSeriesSplit` over Ridge/RF/GBR, naive seasonal baseline, temporal
+  hold-out, forecast plot, refit-on-all) → reuse **exporter**.
+- `app/agents/ts_orchestrator.py`: `build_ts_graph()` with fail-fast edges; `run_pipeline`
+  branches on `pipeline=="timeseries"`. Frontend Studio toggle enabled.
+- **Validity by construction**: only TimeSeriesSplit/temporal splits exist in TS templates —
+  no random K-fold path for time data. Templates use token-replace style (no brace-doubling).
+- **Live-verified**: synthetic daily series (trend+weekly seasonality) → completed,
+  task=time_series_forecasting, winner=RandomForest, RMSE 9.58, walk-forward validated.
+- **Remaining (T3/T4)**: backtest equity-curve-with-costs, ONNX export, history-based TS deploy.
+
+### Baseline multilabel fix + frontend integration (2026-06-17)
+- **Bug**: a multilabel run whose labels live in `label_columns` (no single target) crashed the
+  baseline with `KeyError: ['None']` — `dropna(subset=[target_col])` used target_col="None".
+  Fixed: baseline resolves target(s) per task (label_columns / delimiter / single-label) and now
+  guards a missing target with a clear ValueError instead of KeyError.
+- **Frontend integration**: new `ModelToolsPanel.tsx` wired as a run-page **Tools** tab, surfacing
+  P12 retrain · P13 batch-score · P14 ask-your-model · P15 fairness audit (all via lib/api.ts).
+  P10 compare / P11 per-prediction explain have working backends + api clients (gallery/deploy
+  wiring is the remaining thin follow-up). tsc clean, 39 tests pass.
+
+### Self-debugging execution engine + Code Cookbook (2026-06-17) — see docs/analysis/10
+Answer to "let agents truly handle their own errors, keep templates, RAG-without-vectors".
+Confirmed scope: brittle agents only · JSONL store · E1→E2→E3 · template fallback.
+- **E1 sandbox hardening** (`sandbox/main.py`): generated code runs with `restricted=True` →
+  AST safety screen (block os/subprocess/eval/open/network/dunder-escapes) + restricted builtins
+  + controlled `__import__` (whitelist: pandas/numpy/sklearn/xgboost/scipy/imblearn/joblib/…) + `os`
+  removed. Trusted templates run unchanged (`restricted=False`, full builtins). Executor + BaseAgent
+  thread the flag. Sandbox image rebuilt.
+- **E2 Code Cookbook** (`app/core/code_cookbook.py`, JSONL at `backend/cookbook/`): stores code that
+  ran successfully; retrieval = exact tag filter + keyword overlap + success-health (NO vectors →
+  deterministic, auditable, no hallucinated relevance). Upsert by md5 checksum; fail_count demotes.
+- **E3 agentic loop** (`BaseAgent.execute_code_agentic`): template-first (cheap/deterministic) → on
+  failure the agent WRITES corrected code (seeded by cookbook fixes + the traceback), runs it under
+  the restricted sandbox, reads the new traceback, retries (cap 3), validates the RESULT contract,
+  and records the working fix. Wired into preprocessor + feature_engineer; templates remain the
+  fallback. The happy path is unchanged (no LLM cost unless a template actually fails).
+- **Honesty fix still pending**: correct the homepage's false "No templates, no fixed recipes" copy.
+
+### P7–P17 backlog completed (2026-06-17) — see docs/HANDOFF_P7_P17.md
+One pass, code-only (user tests). 39 backend tests pass, tsc clean.
+- **P8** Tier-2 diagnostic router (bounded: preprocessor failure → EDA once); new `diagnostic`
+  node + `backjumps_used`/`repair_hint` state.
+- **P10–P15** new `app/api/routes/extras.py`: run compare, batch-predict (CSV in→scored CSV out),
+  per-prediction SHAP (`/explain`), grounded ask (`/ask`), fairness audit (disparate impact),
+  champion/challenger retrain. All reuse the sandbox executor / LLM / DB; sandbox code via token-replace.
+- **P16** opt-in API-key + Redis rate-limit middleware in main.py (default OFF via empty `API_KEY`/0).
+- **P17** `tests/test_agents/test_prompts.py` pins prompts to the JSON keys their agents parse.
+- Frontend: all endpoints added to `lib/api.ts` (callable); dedicated panels are fast-follow.
+
+### Model Registry — dynamic models, no hardcoded menu (2026-06-17)
+Replaced the two hardcoded tiers with a single source of truth, `app/core/model_registry.py`:
+- **The source/catalog**: each entry declares name, per-task class strings, task compatibility,
+  GPU/class_weight flags, `installed` (sandbox availability), and its **Optuna search_space**.
+- **model_selector is now a scout**: its prompt menu is RETRIEVED from `registry.menu_text(task)`
+  (not hardcoded); the LLM's chosen classes are validated against the registry all-list before
+  `eval()` (safety); not-installed models can be RECOMMENDED via `discovery_notes` but never train
+  (doc 04: we don't execute code for uninstalled/web-fetched libs on mounted data).
+- **tuner is generic**: search space comes from `registry.search_space_for(winner_class)`
+  injected as a token; the `if/elif` per-family Optuna blocks (objective + refit) collapsed into
+  `_suggest`/`_build`. Adding a model's hyperparameters = a registry entry.
+- **Proof + free P7**: HistGradientBoosting added as one registry entry (now selectable & tunable).
+  CatBoost/LightGBM registered as `installed=False` recommendations (need sandbox rebuild).
+- Gotcha fixed: `"GradientBoosting"` is a substring of `"HistGradientBoosting"` → `search_space_for`
+  now matches the LONGEST family first. 34 tests green.
+- **"Retrieve models from a source"**: the registry IS the curated source the scout retrieves from.
+  Live web *code* retrieval remains deliberately excluded (doc 04); web *knowledge* enrichment is a
+  future opt-in. Adding a model = one registry entry (+ sandbox install if a new lib).
+
+### Churn dataset fix — NaN targets (2026-06-17)
+"All model candidates failed — Input y contains NaN": the churn target had missing values and the
+preprocessor didn't drop NaN-target rows (baseline did, preprocessor didn't). Fixed: drop rows with
+a missing target on every read of the source so X and y stay aligned. Not a complexity limit — a hygiene gap.
+
+### Live verification — ALL milestones green (2026-06-17)
+Final end-to-end runs (real pipelines, not just unit tests):
+- **Tabular** (Iris): completed, f1 0.97 — no regression from the tuner/evaluator token refactor.
+- **P18 Imbalanced** (synthetic 1.5% fraud): completed, framer chose **pr_auc**, SMOTE applied in-fold.
+- **P19 Multilabel** (delimited tags): completed all 10 agents, **deploy→predict returns a label SET
+  `['sports','tech']`**. Four bugs found & fixed live, each advancing the pipeline one stage:
+  (1) `Run.pipeline` missing DB column → `ALTER TABLE`; (2) baseline dummy `constant=0` invalid on 2-D
+  target → `MultiOutputClassifier(most_frequent)`; (3) multilabel `__target__` stored as variable-length
+  label lists → fixed-width binary vectors; (4) evaluator multilabel branch never set `final_score` → added.
+- **P3–P6 Time-Series** (daily seasonal series): completed, task=time_series_forecasting, walk-forward
+  RMSE 9.58, RandomForest winner, forecast plot produced.
+Final state: **34 backend tests pass, tsc clean.**
+
+### data_auditor abort-flakiness fixed (2026-06-16)
+The auditor runs BEFORE the framer, so target/task are always unset at audit time. Its prompt
+listed "target column missing" as an abort criterion → the LLM nondeterministically aborted
+runs (killed a multilabel run). Fixed: prompt now assesses DATA QUALITY only and is told
+target/task are assigned later; user-message no longer presents them as missing.
+
+### Phase 3.9 — Time-Series studio: T1 foundation only (2026-06-16, superseded by 4.0)
+- **Wrong-Door Guard**: tabular `data_auditor` flags a monotonic-datetime column (`temporal_signal`) and warns
+  (never blocks) that random CV overstates performance on time-ordered data.
+- **Mode plumbing**: `AgentState.pipeline` (+ timestamp_col/forecast_horizon/frequency/wrong_door_warning),
+  `Run.pipeline` column, `runs.py` pipeline field, orchestrator threading, frontend Studio selector
+  (Time-Series shown **disabled "Soon"** — roster not built; selecting it would silently run tabular = invalid).
+- **Remaining**: ts_orchestrator graph + run_pipeline branch, ts_auditor/ts_framer/naive-baseline/
+  walk_forward_evaluator (T1), then T2–T4. Prompts: BACKLOG_PROMPTS.md P3–P6.
+
+### Phase 3.8 — First-class severe class imbalance support (2026-06-14)
+
+**Goal**: Proper handling of fraud-like datasets (minority < 5%, e.g. 0.1%) where accuracy/AUC mislead and the minority class is the whole point.
+
+- **Data Auditor / EDA Agent**: Already computed `class_imbalance.ratio` and `imbalance_severity` ("severe" if minority < 5%). Now properly escalated into state and passed through the pipeline.
+- **Problem Framer**: When severe imbalance detected for classification, prefers `primary_metric = "pr_auc"` (average_precision) or recall, NOT roc_auc. Added `pr_auc` to metric vocabulary.
+- **Scoring maps updated** in baseline_builder, model_selector, tuner, feature_engineer, evaluator: `pr_auc` → `average_precision` with multiclass remap (stays as-is since PR-AUC not defined for multiclass in sklearn). Mirrors existing `*_weighted` / `roc_auc_ovr_weighted` pattern.
+- **Preprocessor**: Added optional resampling step via `imbalanced-learn` (already in sandbox requirements.txt). LLM chooses `imbalance_strategy`: `"class_weight"` | `"smote"` | `"smote_tomek"` | `"none"`. SMOTE applied **inside CV folds only** via `imblearn.pipeline.Pipeline` — never touches validation fold (prevents leakage). Guard: SMOTE needs `k_neighbors < minority_count`; falls back to `class_weight` for tiny minorities (< 6).
+- **Inference pipeline**: Resampler is **train-time only** — saved `inference_pipeline.pkl` contains preprocessor + model + threshold + engineered features, NOT the SMOTE step.
+- **Evaluator**: Reports PR-AUC, precision/recall at chosen threshold, and **precision-recall curve plot** (`precision_recall_curve.png`) alongside confusion matrix. Threshold selection honors `fp_fn_preference` — biases toward recall when severe.
+- **Template guard**: All 7 sandbox templates render and compile cleanly (test_templates.py passes).
+- **End-to-end verified**: Synthetic fraud dataset (5000 rows, 0.1% fraud = 5 positives) ran full 10-agent pipeline. Artifacts generated include `precision_recall_curve.png`, `inference_pipeline.pkl` (no resampler), PR-AUC logged (0.0256), recall=0.998 on hold-out. All 32 tests pass.
+
+**Gotchas avoided**:
+- imblearn Pipeline ≠ sklearn Pipeline — resampler only acts during `fit()`, so inference pickle excludes it.
+- Doubled braces `{{ }}` in all template code — template guard test catches any unescaped brace.
+- SMOTE `k_neighbors` guard prevents crash on tiny minority classes.
+- Multiclass remap for `average_precision` mirrors existing pattern (keeps as-is since sklearn doesn't define multiclass PR-AUC).
 
 ### Phase 3.7 — Tier-1 self-repair micro-loop (2026-06-13)
 
@@ -56,6 +416,9 @@ The first step of the doc-06 plan to close the MLE-STAR "dynamic jump-back" gap.
 > the build history. Current analysis docs: hardcoded-vs-agentic audit, control-flow
 > classification, vs-Google-AutoML, web-search verdict, multi-agent/observability/
 > LLM-evaluation, vs-MLE-STAR + micro-loop roadmap, quant-finance fit.
+>
+> **Backlog:** every remaining feature/fix has a ready-to-run prompt in
+> [`docs/BACKLOG_PROMPTS.md`](BACKLOG_PROMPTS.md) (P1–P17, tiered).
 
 ---
 

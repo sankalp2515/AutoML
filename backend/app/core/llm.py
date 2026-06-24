@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.core import context
 from app.core.logging import get_logger
 
 _log = get_logger("llm")
@@ -46,6 +47,22 @@ _BACKOFF_CAP_S = 20.0
 # Groq free tier = 12K tokens/MINUTE — a 429's Retry-After is often 30-60s.
 # Waiting it out beats burning the retry budget and falling back prematurely.
 _RETRY_AFTER_CAP_S = 75.0
+_DEFAULT_COOLDOWN_S = 60.0
+
+# Process-wide provider cooldown circuit-breaker. When a provider returns 429 we
+# record "skip it until this epoch" so EVERY subsequent agent (and concurrent
+# run) jumps straight to the next provider instead of re-paying 2 retries +
+# Retry-After each time. Shared across the singleton LLM client = shared across
+# all runs in the process. The single biggest latency fix under rate limiting.
+_provider_cooldown: dict[str, float] = {}
+
+
+def _cooling(name: str) -> bool:
+    return time.time() < _provider_cooldown.get(name, 0.0)
+
+
+def _cool(name: str, seconds: float) -> None:
+    _provider_cooldown[name] = time.time() + min(max(seconds, 1.0), _RETRY_AFTER_CAP_S)
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -165,9 +182,9 @@ class LLMClient:
         self.provider = self.chain[0].name if self.chain else "anthropic"
         self.model = self.chain[0].model if self.chain else settings.ANTHROPIC_MODEL
 
-        # Populated by BaseAgent before each call so we know which agent is calling
-        self._current_agent: str = "unknown"
-        self._current_run_id: str | None = None
+        # NOTE: which run/agent is calling is read from app.core.context (a
+        # contextvar, per-task), NOT stored here — this client is a process
+        # singleton shared by all concurrent runs.
 
     # ── Core call with retry + fallback ──────────────────────────────────────
 
@@ -180,38 +197,70 @@ class LLMClient:
     ) -> str:
         last_error: Exception | None = None
 
-        for provider in self.chain:
-            for attempt in range(1, _MAX_RETRIES_PER_PROVIDER + 1):
-                t0 = time.perf_counter()
-                try:
-                    text, p_tok, c_tok = await provider.chat(system, user, temperature, max_tokens)
-                    await self._record(provider.name, provider.model, p_tok, c_tok,
-                                       time.perf_counter() - t0)
-                    return text
+        # Outer loop runs at most twice: the 2nd pass only happens if EVERY provider
+        # was skipped due to cooldown and we waited for the soonest one to recover.
+        for outer in range(2):
+            attempted_any = False
+            for provider in self.chain:
+                if _cooling(provider.name):
+                    _log.info("llm_provider_cooling_skip", provider=provider.name,
+                              agent=context.get_agent_name())
+                    continue
+                attempted_any = True
 
-                except _ProviderHTTPError as exc:
-                    last_error = exc
-                    if not exc.retryable:
-                        _log.warning("llm_provider_rejected", provider=provider.name,
-                                     status=exc.status, agent=self._current_agent)
-                        break  # bad key / bad request — move to next provider now
-                    if attempt < _MAX_RETRIES_PER_PROVIDER:
-                        delay = self._backoff_delay(attempt, exc.retry_after)
-                        _log.warning("llm_rate_limited_retrying", provider=provider.name,
-                                     attempt=attempt, delay_s=round(delay, 1),
-                                     agent=self._current_agent)
-                        await asyncio.sleep(delay)
+                for attempt in range(1, _MAX_RETRIES_PER_PROVIDER + 1):
+                    t0 = time.perf_counter()
+                    try:
+                        text, p_tok, c_tok = await provider.chat(system, user, temperature, max_tokens)
+                        await self._record(provider.name, provider.model, p_tok, c_tok,
+                                           time.perf_counter() - t0)
+                        return text
 
-                except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
-                    last_error = exc
-                    if attempt < _MAX_RETRIES_PER_PROVIDER:
-                        delay = self._backoff_delay(attempt)
-                        _log.warning("llm_network_error_retrying", provider=provider.name,
-                                     attempt=attempt, error=str(exc)[:120])
-                        await asyncio.sleep(delay)
+                    except _ProviderHTTPError as exc:
+                        last_error = exc
+                        if exc.status == 429:
+                            # Cool this provider so the NEXT agent/run skips it instead of
+                            # re-paying retries + Retry-After. Move on immediately.
+                            cd = _DEFAULT_COOLDOWN_S
+                            if exc.retry_after:
+                                try:
+                                    cd = float(exc.retry_after)
+                                except ValueError:
+                                    pass
+                            _cool(provider.name, cd)
+                            _log.warning("llm_rate_limited_cooldown", provider=provider.name,
+                                         cooldown_s=round(min(cd, _RETRY_AFTER_CAP_S), 1),
+                                         agent=context.get_agent_name())
+                            break  # to next provider — no long in-request sleep
+                        if not exc.retryable:
+                            _log.warning("llm_provider_rejected", provider=provider.name,
+                                         status=exc.status, agent=context.get_agent_name())
+                            break  # bad key / bad request — next provider
+                        if attempt < _MAX_RETRIES_PER_PROVIDER:
+                            await asyncio.sleep(self._backoff_delay(attempt))  # 5xx backoff
 
-            _log.error("llm_provider_exhausted_falling_back", provider=provider.name,
-                       agent=self._current_agent)
+                    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+                        last_error = exc
+                        if attempt < _MAX_RETRIES_PER_PROVIDER:
+                            delay = self._backoff_delay(attempt)
+                            _log.warning("llm_network_error_retrying", provider=provider.name,
+                                         attempt=attempt, error=str(exc)[:120])
+                            await asyncio.sleep(delay)
+
+                _log.error("llm_provider_exhausted_falling_back", provider=provider.name,
+                           agent=context.get_agent_name())
+
+            if attempted_any:
+                break  # tried real providers this pass — don't wait-and-loop
+            # Every provider is cooling — wait for the soonest to recover, once.
+            soonest = min((_provider_cooldown.get(p.name, 0.0) for p in self.chain), default=0.0)
+            wait = soonest - time.time()
+            if outer == 0 and 0 < wait <= _RETRY_AFTER_CAP_S:
+                _log.warning("llm_all_providers_cooling_waiting", wait_s=round(wait, 1),
+                             agent=context.get_agent_name())
+                await asyncio.sleep(wait + 0.5)
+                continue
+            break
 
         # Anthropic as the final resort if configured (native SDK, not OpenAI-compatible)
         if settings.ANTHROPIC_API_KEY:
@@ -262,7 +311,8 @@ class LLMClient:
     async def _record(self, provider: str, model: str, prompt_tokens: int,
                       completion_tokens: int, latency_s: float) -> None:
         from app.core import metrics
-        agent = self._current_agent
+        agent = context.get_agent_name()
+        run_id = context.get_run_id()
 
         metrics.llm_calls_total.labels(agent_name=agent, provider=provider).inc()
         metrics.llm_tokens_total.labels(agent_name=agent, direction="prompt").inc(prompt_tokens)
@@ -272,9 +322,9 @@ class LLMClient:
         if cost > 0:
             metrics.llm_cost_usd_total.labels(agent_name=agent).inc(cost)
 
-        if self._current_run_id:
+        if run_id:
             await _persist_llm_call(
-                run_id=self._current_run_id,
+                run_id=run_id,
                 agent_name=agent,
                 provider=provider,
                 model=model,

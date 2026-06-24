@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.agents.base_agent import BaseAgent
+from app.core import metric_registry
 from app.core import mlflow_tracker as mlflow
 from app.core.state import AgentState
 
@@ -16,9 +17,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.multioutput import MultiOutputClassifier
 from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 from sklearn.metrics import (roc_auc_score, f1_score, mean_squared_error,
-                              r2_score, accuracy_score)
+                              r2_score, accuracy_score, hamming_loss)
 from sklearn.dummy import DummyClassifier, DummyRegressor
 import joblib
 import os
@@ -28,19 +30,39 @@ df = pd.read_csv(dataset_path)
 target_col = "{target_column}"
 task_type = "{task_type}"
 exclude_cols = {exclude_cols}
+label_columns = {label_columns}
+label_delimiter = "{label_delimiter}"
 
 # Drop excluded and non-feature columns
 drop_cols = [c for c in exclude_cols if c in df.columns]
 df = df.drop(columns=drop_cols)
-df = df.dropna(subset=[target_col])
 
-X = df.drop(columns=[target_col])
-y = df[target_col]
-
-# Encode target for classification
-if task_type != "regression":
-    le = LabelEncoder()
-    y = le.fit_transform(y.astype(str))
+# Resolve target(s) per task — multilabel may have NO single target column
+# (labels live in label_columns), so we must not dropna/drop on a "None" target.
+if task_type == "multilabel_classification" and label_columns:
+    label_cols = [c for c in label_columns if c in df.columns]
+    df = df.dropna(subset=label_cols)
+    X = df.drop(columns=label_cols)
+    y = df[label_cols].values.astype(int)
+elif task_type == "multilabel_classification" and label_delimiter:
+    if target_col not in df.columns:
+        raise ValueError("multilabel delimiter target column not found: " + str(target_col))
+    df = df.dropna(subset=[target_col])
+    X = df.drop(columns=[target_col])
+    from sklearn.preprocessing import MultiLabelBinarizer
+    yy = df[target_col].astype(str).apply(lambda v: v.split(label_delimiter) if v else [])
+    mlb = MultiLabelBinarizer()
+    y = mlb.fit_transform(yy)
+else:
+    # Single-label classification or regression — require a real target column
+    if not target_col or target_col not in df.columns:
+        raise ValueError("target column not found in dataset: " + str(target_col))
+    df = df.dropna(subset=[target_col])
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+    if task_type != "regression":
+        le = LabelEncoder()
+        y = le.fit_transform(y.astype(str))
 
 # Identify numeric and categorical columns
 num_cols = X.select_dtypes(include=["number"]).columns.tolist()
@@ -60,6 +82,10 @@ if task_type == "regression":
     model = Ridge()
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
     scoring = "neg_root_mean_squared_error"
+elif task_type == "multilabel_classification":
+    model = MultiOutputClassifier(LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced"))
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    scoring = "f1_micro"
 else:
     model = LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -79,6 +105,13 @@ if task_type == "regression":
     dummy_scores = cross_val_score(dummy, X, y, cv=cv,
                                    scoring=scoring, n_jobs=1)
     dummy_score = float(-dummy_scores.mean())
+elif task_type == "multilabel_classification":
+    # constant=0 fails on 2-D multilabel targets; per-label most_frequent is the
+    # correct naive floor.
+    dummy = MultiOutputClassifier(DummyClassifier(strategy="most_frequent"))
+    dummy_scores = cross_val_score(dummy, X, y, cv=cv,
+                                   scoring=scoring, n_jobs=1)
+    dummy_score = float(dummy_scores.mean())
 else:
     dummy = DummyClassifier(strategy="most_frequent")
     dummy_scores = cross_val_score(dummy, X, y, cv=cv,
@@ -95,12 +128,18 @@ joblib.dump(pipeline, baseline_path)
 # Error analysis: find hard samples (where baseline is most wrong)
 if task_type != "regression":
     try:
-        y_pred_proba = pipeline.predict_proba(X)[:, 1] if task_type == "binary_classification" \
-            else pipeline.predict_proba(X).max(axis=1)
-        y_pred = pipeline.predict(X)
-        error_mask = (y_pred != y)
+        if task_type == "multilabel_classification":
+            y_pred = pipeline.predict(X)
+            # For multilabel, compute subset accuracy (exact match)
+            error_mask = (y_pred != y).any(axis=1)
+            error_rate = float(error_mask.mean())
+        else:
+            y_pred_proba = pipeline.predict_proba(X)[:, 1] if task_type == "binary_classification" \
+                else pipeline.predict_proba(X).max(axis=1)
+            y_pred = pipeline.predict(X)
+            error_mask = (y_pred != y)
+            error_rate = float(error_mask.mean())
         hard_sample_profile = df[error_mask].describe().to_dict() if error_mask.any() else {{}}
-        error_rate = float(error_mask.mean())
     except Exception:
         hard_sample_profile = {{}}
         error_rate = 0.0
@@ -133,36 +172,30 @@ class BaselineBuilderAgent(BaseAgent):
         await self._mark_step(run_id, "running")
         await self.emit(run_id, "Training baseline model first — this establishes our performance floor...")
 
-        scoring_map = {
-            "auc_roc": "roc_auc", "recall": "recall", "precision": "precision",
-            "f1": "f1", "accuracy": "accuracy", "rmse": "neg_root_mean_squared_error",
-            "mae": "neg_mean_absolute_error", "r2": "r2",
-        }
-        if state["task_type"] == "regression":
-            default_scoring = "neg_root_mean_squared_error"
-        elif state["task_type"] == "multiclass_classification":
-            default_scoring = "f1_weighted"
-        else:
-            default_scoring = "roc_auc"
-        scoring = scoring_map.get(state.get("primary_metric", ""), default_scoring)
-
-        # Binary-only scorers produce NaN on multiclass — remap to weighted variants
-        if state["task_type"] == "multiclass_classification":
-            scoring = {
-                "roc_auc": "roc_auc_ovr_weighted",
-                "recall": "recall_weighted",
-                "precision": "precision_weighted",
-                "f1": "f1_weighted",
-            }.get(scoring, scoring)
+        # Scorer resolution comes from metric_registry (single source of truth) —
+        # it applies the multiclass remap so binary-only scorers don't NaN.
+        scoring = metric_registry.sklearn_scorer(
+            state.get("primary_metric", ""), state["task_type"]
+        )
 
         code = BASELINE_CODE_TEMPLATE.format(
             target_column=state["target_column"],
             task_type=state["task_type"],
             exclude_cols=repr(state.get("exclude_columns", [])),
             scoring=scoring,
+            label_columns=repr(state.get("label_columns", [])),
+            label_delimiter=state.get("label_delimiter", ""),
         )
 
         result = await self.execute_code(code, run_id, timeout=180)
+        result = await self.try_agentic_repair(
+            run_id, code, result,
+            task_type=state.get("task_type", "unknown"),
+            result_keys=["baseline_score", "dummy_score", "baseline_model", "metric_used", "n_samples"],
+            goal=("Train a simple baseline (LogisticRegression/Ridge) on dataset_path with minimal "
+                  "preprocessing and 5-fold CV. Set RESULT with baseline_score (float), dummy_score "
+                  "(float, naive baseline), baseline_model (str), metric_used (str), n_samples (int)."),
+        )
         if not result["success"]:
             await self._mark_step(run_id, "failed", result["error"])
             return {"error": f"Baseline training failed: {result['error']}", "status": "failed"}

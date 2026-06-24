@@ -19,12 +19,18 @@ os.makedirs(artifacts_dir_path, exist_ok=True)
 
 tuned_path = TUNED_PATH
 preprocessor_path = PREPROCESSOR_PATH
+multilabel_binarizer_path = MULTILABEL_BINARIZER_PATH
 
 # Save as a plain dict — custom classes defined in exec() can't be pickled
 # (pickle needs to look up the class by module path, which doesn't exist for
 # classes defined inside exec'd code). The generated API defines the wrapper.
 preprocessor = joblib.load(preprocessor_path) if preprocessor_path and os.path.exists(preprocessor_path) else None
 model = joblib.load(tuned_path) if tuned_path and os.path.exists(tuned_path) else None
+# Multilabel: the binarizer decodes the binary prediction matrix back to label sets
+multilabel_binarizer = (
+    joblib.load(multilabel_binarizer_path)
+    if multilabel_binarizer_path and os.path.exists(multilabel_binarizer_path) else None
+)
 
 pipeline_path = ""
 if model:
@@ -33,6 +39,10 @@ if model:
         "model": model,
         "threshold": THRESHOLD,
         "target_classes": TARGET_CLASSES,
+        # task_type + binarizer let the inference layer decode predictions correctly
+        # (single label vs. a SET of labels for multilabel).
+        "task_type": TASK_TYPE,
+        "multilabel_binarizer": multilabel_binarizer,
         # LLM-engineered features: the model was trained on preprocessed +
         # engineered columns, so inference MUST reproduce these formulas.
         "engineered_features": ENGINEERED_FEATURES,
@@ -532,6 +542,8 @@ Use the actual numbers from the execution trace — never write generic placehol
             .replace("PREPROCESSOR_PATH", repr(state.get("preprocessor_path", "")))
             .replace("THRESHOLD", repr(float(recommended_threshold)))
             .replace("TARGET_CLASSES", repr(state.get("target_classes") or []))
+            .replace("MULTILABEL_BINARIZER_PATH", repr(state.get("multilabel_binarizer_path") or ""))
+            .replace("TASK_TYPE", repr(state.get("task_type") or "unknown"))
             .replace("ENGINEERED_FEATURES", repr([
                 {"name": f.get("name"), "formula": f.get("formula"),
                  "fill_value": f.get("fill_value", 0.0)}
@@ -544,6 +556,16 @@ Use the actual numbers from the execution trace — never write generic placehol
         )
 
         result = await self.execute_code(code, run_id, timeout=120)
+        result = await self.try_agentic_repair(
+            run_id, code, result,
+            task_type=state.get("task_type", "unknown"),
+            result_keys=["pipeline_path"],
+            goal=("Assemble the inference pipeline as a plain dict "
+                  "{preprocessor, model, threshold, target_classes, engineered_features, task_type, "
+                  "multilabel_binarizer} (load the preprocessor/model from the paths in the failed "
+                  "code) and joblib.dump it to artifacts_dir/inference_pipeline.pkl. Set RESULT with "
+                  "pipeline_path (str). Other artifacts (notebook/api/model_card) are optional."),
+        )
         if not result["success"]:
             await self._mark_step(run_id, "failed", result["error"])
             return {"error": f"Export failed: {result['error']}", "status": "failed"}
