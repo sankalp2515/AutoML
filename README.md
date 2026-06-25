@@ -6,6 +6,7 @@
 
 *The LLM proposes; sklearn disposes.* Every agent decision is verified by execution — never trusted on the model's word.
 
+![CI](https://github.com/sankalp2515/AutoML/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)
 ![LangGraph](https://img.shields.io/badge/LangGraph-stateful%20agents-orange)
