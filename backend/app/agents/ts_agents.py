@@ -394,8 +394,31 @@ RESULT = {
     "n_splits": n_splits,
     "metric": metric,
     "plot_made": plot_made,
+    # Hold-out actuals + forecasts for the backend trading diagnostic (Sharpe/drawdown).
+    "holdout_actual": [float(v) for v in y[split:]],
+    "holdout_pred": [float(v) for v in holdout_pred],
 }
 '''
+
+
+def trading_diagnostic(holdout_actual, holdout_pred, cost_bps: float = 1.0):
+    """Directional trading diagnostic for a forecast on a PRICE-LIKE series:
+    go long/short based on whether the forecast is above/below the last actual, then
+    score the period-over-period returns. Returns a backtest summary (Sharpe, drawdown,
+    turnover, hit-rate, equity curve) or None if the series is too short. Meaningful only
+    when the target is a level/price; reported as an illustrative diagnostic."""
+    import numpy as np
+    from app.core import backtest
+
+    a = np.asarray(holdout_actual, dtype=float)
+    p = np.asarray(holdout_pred, dtype=float)
+    if a.size < 3 or p.size < 3:
+        return None
+    prev = a[:-1]
+    denom = np.where(np.abs(prev) < 1e-9, 1e-9, np.abs(prev))
+    actual_ret = (a[1:] - prev) / denom          # realized period returns
+    signal = np.sign(p[1:] - prev)                # predicted direction vs last actual
+    return backtest.backtest_summary(actual_ret, signal, cost_bps=cost_bps)
 
 
 class TSModelerAgent(BaseAgent):
@@ -446,6 +469,22 @@ class TSModelerAgent(BaseAgent):
             f"ts_baseline_{metric}": baseline,
         })
 
+        # Quant trading diagnostic (Sharpe/drawdown/turnover) on the hold-out forecast.
+        bt_metrics = trading_diagnostic(data.get("holdout_actual", []), data.get("holdout_pred", []))
+        if bt_metrics:
+            await self._log_decision(
+                run_id=run_id,
+                decision=f"Trading diagnostic: Sharpe {bt_metrics['sharpe']}, "
+                         f"max drawdown {bt_metrics['max_drawdown']}, hit-rate {bt_metrics['hit_rate']}",
+                reasoning="Directional long/short strategy from the forecast vs. last actual, "
+                          "net of transaction costs. Illustrative — meaningful for price-like series.",
+                result_summary=f"sharpe={bt_metrics['sharpe']}, total_return={bt_metrics['total_return']}",
+            )
+            mlflow.log_metrics({
+                "ts_sharpe": bt_metrics["sharpe"],
+                "ts_max_drawdown": bt_metrics["max_drawdown"],
+            })
+
         # Log plot artifact
         import os
         plot = os.path.join(state.get("data_dir", "/data"), run_id, "artifacts", "forecast_plot.png")
@@ -479,6 +518,7 @@ class TSModelerAgent(BaseAgent):
                 f"baseline_{metric}": baseline,
             }},
             "iteration_scores": [data["holdout_score"]],
+            "backtest_metrics": bt_metrics or {},
             "decision_log": state.get("decision_log", []) + [entry],
             "notebook_cells": state.get("notebook_cells", []) + [cell],
         }

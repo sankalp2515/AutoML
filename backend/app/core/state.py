@@ -88,6 +88,9 @@ class AgentState(TypedDict, total=False):
     tuned_model_path: str           # path to tuned_model.pkl
     tuned_score: float
 
+    # Quant trading diagnostic (time-series) — Sharpe/drawdown/turnover from the forecast
+    backtest_metrics: dict[str, Any]
+
     # Evaluator outputs
     evaluation_report: dict[str, Any]
     slice_performance: dict[str, Any]

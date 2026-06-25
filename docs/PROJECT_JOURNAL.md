@@ -30,6 +30,31 @@ From the user's first live test pass.
 - **Production audit** `docs/PRODUCTION_AUDIT.md` — full severity/status table; top open items: real SECRET_KEY
   + secrets manager, move inference `eval` into the sandbox, add fallback LLM key, CI integration harness,
   dataset retention/encryption, Grafana creds.
+### Tower track — #5/#1 kickoff: quant backtest metrics (2026-06-25)
+Toward the "Reproducible Research Toolkit" (#5) + "Distributed ML Research Platform" (#1) extensions
+for quant-finance relevance (Tower Research). First verifiable slice landed:
+- `app/core/backtest.py` — pure-numpy quant metrics: transaction-cost-aware equity curve,
+  Sharpe/Sortino, max drawdown, turnover, hit-rate, buy-&-hold benchmark; `backtest_summary()`
+  takes (actual_returns, pred_returns) → full performance dict. Designed to plug into the TS
+  evaluator so forecasts are judged on Sharpe/drawdown, not just RMSE. `test_backtest.py` (8 tests).
+- Remaining for #5: CLI + YAML config wrapper; wire backtest_summary into ts_modeler/evaluator;
+  PDF report export. For #1: DVC (data lineage), Ray (parallel candidate/Optuna training).
+
+### Phase 5.2 — AI-Engineering hardening (2026-06-19)
+Closed the "AI Engineer lens" gaps from the audit (ML-Eng + AI-PM lenses deferred). 132 tests pass.
+- **LLM completion cache** (opt-in `LLM_CACHE_ENABLED`): identical (system,user,model,temp) → stored
+  text, saving tokens+latency on retries/duplicate framing. `test_llm_cache.py`.
+- **Per-tenant LLM cost budget** (`TENANT_BUDGET_USD`, 0=unlimited): create_run sums the tenant's
+  `llm_calls` cost and 402s when the cap is hit. DB-level test in `test_tenancy.py`.
+- **Prompt-injection guardrail** `core/guardrails.py`: `scan_for_injection`/`neutralize_injection`
+  (regex set for override/exfiltration/jailbreak patterns); create_run strips + logs (or 400s if
+  `INJECTION_GUARD_STRICT`). The goal is only ever used as DATA + output is validated, so risk is low —
+  this is defense-in-depth. `test_injection_and_eval.py`.
+- **LLM-output robustness eval harness**: feeds adversarial/malformed framings through
+  `validate_and_fix_framing`, asserting it never crashes and always yields a task-valid metric.
+- **Tracing**: one structured `llm_call` log line per call (run_id-correlated; tokens/cost/latency/
+  provider) — OTel/LangSmith-ready via the log pipeline.
+
 ### Phase 5.1 — audit fixes + CI integration harness (2026-06-19)
 - **CI INTEGRATION HARNESS** `tests/test_integration/test_pipeline_graph.py` — drives the REAL compiled
   LangGraph end-to-end with each agent's run() stubbed (no LLM/sandbox/DB). Asserts: agent order +

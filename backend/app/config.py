@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     API_KEY: str = ""
     RATE_LIMIT_PER_MIN: int = 0   # 0 = disabled
 
+    # LLM cost/quality controls (AI-engineering hardening).
+    LLM_CACHE_ENABLED: bool = False        # cache identical (system,user,model,temp) completions
+    LLM_CACHE_TTL_S: int = 3600
+    TENANT_BUDGET_USD: float = 0.0         # cumulative LLM-cost cap per tenant (0 = unlimited)
+    INJECTION_GUARD_STRICT: bool = False   # reject goals with detected prompt-injection (else log+strip)
+
     # Multi-tenancy (Phase 4) — opt-in. JSON mapping of api-key → tenant id, e.g.
     # '{"key_abc":"acme","key_xyz":"globex"}'. EMPTY = single-tenant "public" mode
     # (no behavior change). When set, each run is owned by the caller's tenant and

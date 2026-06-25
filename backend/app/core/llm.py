@@ -65,6 +65,30 @@ def _cool(name: str, seconds: float) -> None:
     _provider_cooldown[name] = time.time() + min(max(seconds, 1.0), _RETRY_AFTER_CAP_S)
 
 
+# In-process completion cache (opt-in). Identical (system,user,model,temp) prompts
+# return the stored text — saving tokens + latency on retries/duplicate framing.
+import hashlib
+
+_completion_cache: dict[str, tuple[str, float]] = {}
+
+
+def _cache_key(model: str, system: str, user: str, temperature: float) -> str:
+    h = hashlib.sha256(f"{model}\x00{temperature}\x00{system}\x00{user}".encode()).hexdigest()
+    return h
+
+
+def _cache_get(key: str) -> str | None:
+    hit = _completion_cache.get(key)
+    if hit and time.time() < hit[1]:
+        return hit[0]
+    return None
+
+
+def _cache_set(key: str, text: str) -> None:
+    from app.config import settings as _s
+    _completion_cache[key] = (text, time.time() + _s.LLM_CACHE_TTL_S)
+
+
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     pricing = _COST_PER_1M.get(model, {"prompt": 0.0, "completion": 0.0})
     return (prompt_tokens * pricing["prompt"] + completion_tokens * pricing["completion"]) / 1_000_000
@@ -197,6 +221,15 @@ class LLMClient:
     ) -> str:
         last_error: Exception | None = None
 
+        # Cache: identical prompt → stored completion (opt-in, saves tokens/latency).
+        cache_model = self.chain[0].model if self.chain else self.model
+        ckey = _cache_key(cache_model, system, user, temperature)
+        if settings.LLM_CACHE_ENABLED:
+            cached = _cache_get(ckey)
+            if cached is not None:
+                _log.info("llm_cache_hit", agent=context.get_agent_name())
+                return cached
+
         # Outer loop runs at most twice: the 2nd pass only happens if EVERY provider
         # was skipped due to cooldown and we waited for the soonest one to recover.
         for outer in range(2):
@@ -214,6 +247,8 @@ class LLMClient:
                         text, p_tok, c_tok = await provider.chat(system, user, temperature, max_tokens)
                         await self._record(provider.name, provider.model, p_tok, c_tok,
                                            time.perf_counter() - t0)
+                        if settings.LLM_CACHE_ENABLED:
+                            _cache_set(ckey, text)
                         return text
 
                     except _ProviderHTTPError as exc:
@@ -321,6 +356,12 @@ class LLMClient:
         cost = _estimate_cost(model, prompt_tokens, completion_tokens)
         if cost > 0:
             metrics.llm_cost_usd_total.labels(agent_name=agent).inc(cost)
+
+        # One structured trace line per LLM call (run_id correlates a full pipeline
+        # trace; ready to ship to OTel/LangSmith via the log pipeline).
+        _log.info("llm_call", run_id=run_id, agent=agent, provider=provider, model=model,
+                  prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                  latency_ms=round(latency_s * 1000, 1), cost_usd=round(cost, 6))
 
         if run_id:
             await _persist_llm_call(

@@ -24,6 +24,8 @@ frontend/node_modules/
 backend/cookbook/
 test_data/
 *.log
-docs/
-scripts/
-backend/tests
+*.db
+
+# NOTE: docs/, scripts/, and backend/tests are intentionally TRACKED — they back
+# the README's claims (architecture docs, 142 tests, the data generator) and are
+# part of the portfolio. Only runtime/generated artifacts above are ignored.

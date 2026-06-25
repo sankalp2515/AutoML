@@ -10,8 +10,11 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.core.auth import current_tenant
 from app.core.job_queue import submit_run
+from app.core.logging import get_logger
 from app.database import get_db
-from app.models.run import Run
+from app.models.run import LLMCall, Run
+
+_log = get_logger("runs")
 from app.schemas.run import CreateRunRequest, RunDetailOut, RunListOut, RunOut, ResultsOut
 from app.redis_client import get_run_state
 
@@ -61,9 +64,27 @@ async def create_run(
                        "Wait for a run to finish.",
             )
 
-    # Guardrail: sanitize free-text goal (strip control chars, cap length).
-    from app.core.guardrails import sanitize_user_goal
+    # Per-tenant cumulative LLM-cost budget (0 = unlimited).
+    if settings.TENANT_BUDGET_USD and settings.TENANT_BUDGET_USD > 0:
+        spent = await db.execute(
+            select(func.coalesce(func.sum(LLMCall.estimated_cost_usd), 0.0))
+            .select_from(LLMCall).join(Run, LLMCall.run_id == Run.id)
+            .where(Run.tenant_id == tenant)
+        )
+        if float(spent.scalar() or 0.0) >= settings.TENANT_BUDGET_USD:
+            raise HTTPException(
+                status_code=402,
+                detail=f"LLM budget of ${settings.TENANT_BUDGET_USD} reached for this tenant.",
+            )
+
+    # Guardrail: sanitize free-text goal + scan/neutralize prompt injection.
+    from app.core.guardrails import sanitize_user_goal, neutralize_injection
     user_goal = sanitize_user_goal(user_goal)
+    user_goal, injection_flags = neutralize_injection(user_goal)
+    if injection_flags:
+        if settings.INJECTION_GUARD_STRICT:
+            raise HTTPException(status_code=400, detail="Goal rejected: prompt-injection detected.")
+        _log.warning("prompt_injection_neutralized", flags=injection_flags)
     if len(user_goal) < 10:
         raise HTTPException(status_code=422, detail="user_goal too short after sanitization")
 

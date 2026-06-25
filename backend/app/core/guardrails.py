@@ -9,7 +9,26 @@ input. They never raise — they FIX and report, so the run continues safely.
 
 from __future__ import annotations
 
+import re
+
 from app.core import metric_registry
+
+# Prompt-injection patterns to detect in the free-text goal. The goal is only ever
+# used as DATA to frame an ML problem (the LLM has no tools/data access and its
+# output is structurally validated), so injection is low-risk — but detecting and
+# neutralizing it is the expected AI-engineering practice.
+_INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?(the\s+)?(previous|above|prior)\s+instructions",
+    r"disregard\s+(the\s+)?(above|previous|prior)",
+    r"you\s+are\s+now\b",
+    r"\bact\s+as\b",
+    r"system\s+prompt",
+    r"(reveal|print|show|repeat)\s+(your|the)\s+(instructions|prompt|system)",
+    r"developer\s+mode",
+    r"\bjailbreak\b",
+    r"</?(system|instructions?|assistant)>",
+]
+_INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
 _VALID_TASKS = {
     "binary_classification", "multiclass_classification",
@@ -26,6 +45,22 @@ def sanitize_user_goal(goal: str) -> str:
     cleaned = "".join(c for c in goal if c in ("\n", "\t") or ord(c) >= 32)
     cleaned = " ".join(cleaned.split())
     return cleaned[:_MAX_GOAL_LEN]
+
+
+def scan_for_injection(text: str) -> list[str]:
+    """Return the distinct prompt-injection phrases detected in `text` (empty = clean)."""
+    if not text:
+        return []
+    return sorted({m.group(0).lower() for m in _INJECTION_RE.finditer(text)})
+
+
+def neutralize_injection(text: str) -> tuple[str, list[str]]:
+    """Strip detected injection phrases, returning (cleaned_text, flags)."""
+    flags = scan_for_injection(text)
+    if not flags:
+        return text, []
+    cleaned = _INJECTION_RE.sub("[removed]", text)
+    return " ".join(cleaned.split()), flags
 
 
 def validate_and_fix_framing(framing: dict, columns: list[str]) -> tuple[dict, list[str]]:
