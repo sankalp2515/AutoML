@@ -1,0 +1,21 @@
+# Research config consumed by the toolkit CLI and tracked by DVC as a pipeline
+# parameter file. Edit, then `dvc repro` to re-run the experiment reproducibly.
+target: close
+metric: rmse
+
+features:
+  lags: [1, 2, 3, 5]
+  rolling: [5, 10]
+
+cv:
+  method: purged        # purged | walkforward
+  n_splits: 5
+  embargo_pct: 0.01
+
+models: [ridge, random_forest, gradient_boosting]
+
+backtest:
+  cost_bps: 1.0
+
+data: data/prices.csv     # DVC-tracked dataset (dvc add data/prices.csv)
+report: out/report.json

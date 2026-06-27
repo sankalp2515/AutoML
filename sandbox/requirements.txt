@@ -15,3 +15,8 @@ joblib==1.4.2
 imbalanced-learn==0.12.4
 category-encoders==2.6.4
 pydantic==2.10.3
+# Deep learning (DL-0). CUDA build for the GPU sandbox; pip pulls it from the
+# PyTorch index over HTTPS. Adds ~2GB to the image. For a CPU-only box, swap the
+# index URL to .../whl/cpu in the Dockerfile.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0

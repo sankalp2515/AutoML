@@ -15,10 +15,18 @@ async def websocket_progress(websocket: WebSocket, run_id: str) -> None:
 
     redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     pubsub = redis.pubsub()
-    await pubsub.subscribe(f"run:{run_id}:progress")
 
     try:
         await websocket.send_json({"type": "connected", "run_id": run_id})
+
+        # Replay the run's progress so far (covers the case where the browser
+        # connects after the pipeline already started), THEN subscribe for live
+        # updates. Without this, early agent messages are lost and the UI looks
+        # stuck until a late message arrives.
+        history = await redis.lrange(f"run:{run_id}:progress:log", 0, -1)
+        for raw in history:
+            await websocket.send_text(raw)
+        await pubsub.subscribe(f"run:{run_id}:progress")
 
         async def _listen() -> None:
             async for message in pubsub.listen():

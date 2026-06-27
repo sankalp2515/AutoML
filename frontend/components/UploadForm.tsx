@@ -80,7 +80,7 @@ export default function UploadForm() {
     <form onSubmit={handleSubmit} className="space-y-7">
       {/* ── The studio (pipeline mode) ──────────────────────────────────── */}
       <div>
-        <p className="eyebrow-dim mb-3">The Studio</p>
+        <p className="eyebrow-dim mb-3">Pipeline Type</p>
         <div className="grid grid-cols-2 gap-2">
           {([
             ['tabular', 'Tabular', 'Classification & regression on flat data', false],
@@ -117,7 +117,7 @@ export default function UploadForm() {
 
       {/* ── The dataset ─────────────────────────────────────────────────── */}
       <div>
-        <p className="eyebrow-dim mb-3">i. The Dataset</p>
+        <p className="eyebrow-dim mb-3">1. Dataset</p>
         <div
           className={`relative rounded-xl border border-dashed p-10 text-center cursor-pointer transition-all duration-500 ${
             isDragging
@@ -165,7 +165,7 @@ export default function UploadForm() {
 
       {/* ── The intention ───────────────────────────────────────────────── */}
       <div className="space-y-3">
-        <p className="eyebrow-dim">ii. The Intention</p>
+        <p className="eyebrow-dim">2. Goal</p>
         <textarea
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
@@ -264,10 +264,10 @@ export default function UploadForm() {
       >
         {isSubmitting ? (
           <>
-            <Spinner /> Commissioning…
+            <Spinner /> Starting…
           </>
         ) : (
-          <>Begin the Work</>
+          <>Run Pipeline</>
         )}
       </button>
     </form>

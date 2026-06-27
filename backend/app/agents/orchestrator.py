@@ -82,8 +82,13 @@ async def node_tuner(state: AgentState) -> dict:
 
 
 async def node_evaluator(state: AgentState) -> dict:
+    # Capture the PRIOR iteration's score as prev_score BEFORE the evaluator
+    # overwrites current_score — otherwise the iteration gate always compares
+    # against 0 and "improvement" equals the raw score (it never converges).
+    prev = state.get("current_score")
     result = await _evaluator.run(state)
-    # Increment iteration counter
+    if prev is not None:
+        result["prev_score"] = prev
     result["iteration"] = state.get("iteration", 0) + 1
     return result
 

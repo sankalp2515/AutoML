@@ -61,16 +61,16 @@ export default function RunsPage() {
       {/* Header */}
       <div className="flex items-end justify-between animate-fade-up">
         <div className="space-y-2">
-          <p className="eyebrow">The Gallery</p>
+          <p className="eyebrow">Runs</p>
           <h1 className="font-display text-4xl text-bone tracking-tight">
-            Commissioned Works
+            Your Runs
           </h1>
           <p className="font-mono text-[11px] text-bone-ghost uppercase tracking-[0.18em]">
-            {total} piece{total !== 1 ? 's' : ''} in the collection
+            {total} run{total !== 1 ? 's' : ''}
           </p>
         </div>
         <Link href="/" className="btn-gold font-mono text-[11px] uppercase tracking-[0.18em] px-6 py-3">
-          + New Commission
+          + New Model
         </Link>
       </div>
 
@@ -88,9 +88,9 @@ export default function RunsPage() {
       ) : runs.length === 0 ? (
         <div className="lux-card flex flex-col items-center justify-center py-20 space-y-4">
           <span className="font-display text-4xl text-gold-700 italic">∅</span>
-          <p className="font-display text-lg text-bone-dim">The gallery awaits its first piece.</p>
+          <p className="font-display text-lg text-bone-dim">No runs yet.</p>
           <Link href="/" className="font-mono text-[11px] uppercase tracking-luxe text-gold-400 hover:text-gold-300 transition-colors">
-            Commission one →
+            Train one →
           </Link>
         </div>
       ) : (

@@ -50,12 +50,19 @@ _LOGREG_SPACE = {
     "penalty": {"type": "categorical", "choices": ["l1", "l2"]},
 }
 _RIDGE_SPACE = {"alpha": {"type": "float", "low": 1e-4, "high": 100.0, "log": True}}
+# Deep MLP: tune the scalar training knobs Optuna handles cleanly; architecture
+# (hidden_dims) stays at a sensible default for DL-0 (architecture search is a later step).
+_TORCHMLP_SPACE = {
+    "lr": {"type": "float", "low": 1e-4, "high": 1e-2, "log": True},
+    "dropout": {"type": "float", "low": 0.0, "high": 0.5},
+    "weight_decay": {"type": "float", "low": 1e-6, "high": 1e-3, "log": True},
+}
 
 # family → search space (tuner matches winner_class substring to a family)
 SEARCH_SPACES: dict[str, dict] = {
     "XGB": _XGB_SPACE, "GradientBoosting": _GB_SPACE, "RandomForest": _RF_SPACE,
     "HistGradientBoosting": _HGB_SPACE, "LogisticRegression": _LOGREG_SPACE,
-    "Ridge": _RIDGE_SPACE,
+    "Ridge": _RIDGE_SPACE, "TorchMLP": _TORCHMLP_SPACE,
 }
 
 # The registry. `class` maps task family → concrete sklearn/xgb class string.
@@ -101,6 +108,15 @@ MODEL_REGISTRY: list[dict[str, Any]] = [
         "tasks": ["regression"],
         "supports_class_weight": False,
         "desc": "Linear, interpretable baseline for regression.",
+    },
+    {
+        "name": "TorchMLP", "family": "TorchMLP", "installed": False, "gpu": True,
+        "class": {"classification": "TorchMLPClassifier", "regression": "TorchMLPRegressor"},
+        "tasks": ["binary_classification", "multiclass_classification", "regression"],
+        "supports_class_weight": False,
+        "requires": "torch",
+        "desc": "Feed-forward neural net (PyTorch, GPU+AMP). Consider on large, high-signal "
+                "datasets where non-linear interactions matter; GBDTs usually win on small tabular.",
     },
     # ── Recommendations (NOT installed — scout may surface with an install hint) ──
     {

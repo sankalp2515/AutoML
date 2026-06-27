@@ -27,8 +27,28 @@ async def close_redis() -> None:
 
 
 async def publish_progress(run_id: str, payload: dict[str, Any]) -> None:
+    """Publish a live progress message AND append it to a replayable log.
+
+    Pub/sub is ephemeral — a client that connects after a message is published
+    never sees it. So we also store every message in a capped, TTL'd Redis list
+    that the WebSocket replays on connect, so a late-joining browser still sees
+    the whole run from the start.
+    """
     redis = await get_redis()
-    await redis.publish(f"run:{run_id}:progress", json.dumps(payload))
+    msg = json.dumps(payload)
+    log_key = f"run:{run_id}:progress:log"
+    pipe = redis.pipeline()
+    pipe.publish(f"run:{run_id}:progress", msg)
+    pipe.rpush(log_key, msg)
+    pipe.ltrim(log_key, -1000, -1)   # keep at most the last 1000 messages
+    pipe.expire(log_key, 86400)
+    await pipe.execute()
+
+
+async def get_progress_log(run_id: str) -> list[str]:
+    """Replay buffer: every progress message published for this run so far."""
+    redis = await get_redis()
+    return await redis.lrange(f"run:{run_id}:progress:log", 0, -1)
 
 
 async def set_run_state(run_id: str, state: dict[str, Any]) -> None:

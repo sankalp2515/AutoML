@@ -368,6 +368,9 @@ class BaseAgent:
         from app.core import code_cookbook
 
         fixes = code_cookbook.retrieve(agent_role, task_type, tags, keywords=error, k=2)
+        # Layer 2: log the retrieved context (RAG-without-vectors) for traceability.
+        self._log.info("context_retrieved", run_id=run_id, agent=self.name,
+                       n_fixes=len(fixes), provenance=[f.get("provenance") for f in fixes])
         fixes_text = "\n\n".join(
             f"# prior fix (provenance={f.get('provenance')}, used {f.get('success_count')}x):\n"
             f"{f.get('code', '')[:1500]}"

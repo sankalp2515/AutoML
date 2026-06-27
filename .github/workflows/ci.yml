@@ -35,3 +35,25 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
           GROQ_API_KEY: test_key_for_ci
         run: pytest -q -p no:cacheprovider
+
+      - name: OpenAPI schema is up to date
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./test.db
+          GROQ_API_KEY: test_key_for_ci
+        run: |
+          python -c "import json; from app.main import app; open('openapi.json','w').write(json.dumps(app.openapi(), indent=2))"
+          git diff --exit-code openapi.json || (echo "::error::openapi.json is stale — regenerate it" && exit 1)
+
+  openapi-types:
+    name: Frontend types match the API (no contract drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Regenerate types from the committed schema and check for drift
+        run: |
+          npx -y openapi-typescript@7 backend/openapi.json -o frontend/lib/api-schema.ts
+          git diff --exit-code frontend/lib/api-schema.ts || (echo "::error::api-schema.ts is stale — run 'npm run gen:api'" && exit 1)
+

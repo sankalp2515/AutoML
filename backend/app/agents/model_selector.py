@@ -55,6 +55,13 @@ from sklearn.svm import SVC
 from sklearn.multioutput import MultiOutputClassifier
 import xgboost as xgb
 
+# Deep-learning estimators (baked into the sandbox image). Guarded so the template
+# still works before torch is added; the scout only selects these when installed.
+try:
+    from automl_dl import TorchMLPClassifier, TorchMLPRegressor
+except Exception:
+    pass
+
 enriched_path = "{enriched_path}"
 df = pd.read_csv(enriched_path)
 

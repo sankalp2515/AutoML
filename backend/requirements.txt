@@ -4,11 +4,14 @@ sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 aiosqlite==0.20.0
 alembic==1.14.0
+dvc==3.59.1
+pyyaml==6.0.2
 pydantic==2.10.3
 pydantic-settings==2.6.1
 redis[asyncio]==5.2.1
 arq==0.26.3
 pyjwt==2.10.1
+cryptography==44.0.0
 langgraph==0.2.60
 groq==0.13.0
 anthropic==0.40.0
@@ -28,3 +31,4 @@ prometheus-fastapi-instrumentator==7.0.0
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-httpx==0.35.0
+ray[default]==2.40.0

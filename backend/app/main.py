@@ -48,6 +48,54 @@ app.add_middleware(
 )
 
 
+# ── Request observability (Layer 1 + correlation id for Layer 5) ──────────────
+import re as _re
+import time as _time
+import uuid as _uuid
+
+from app.core import context as _ctx
+from app.core import metrics as _metrics
+from app.core.logging import get_logger as _get_logger
+
+_req_log = _get_logger("http")
+# Collapse ids in the path so the metric label doesn't explode in cardinality.
+_ID_RE = _re.compile(
+    r"/(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\d+)(?=/|$)"
+)
+
+
+def _norm_path(p: str) -> str:
+    return _ID_RE.sub("/:id", p)
+
+
+@app.middleware("http")
+async def request_observability(request, call_next):
+    """Assign/propagate an X-Request-ID, time the request, log it, and record
+    HTTP metrics. The request id is bound to a contextvar so every downstream log
+    (LLM calls, decisions) can be correlated to the originating request."""
+    request_id = request.headers.get("x-request-id") or _uuid.uuid4().hex[:16]
+    _ctx.set_request_id(request_id)
+    t0 = _time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        dur = _time.perf_counter() - t0
+        path = _norm_path(request.url.path)
+        try:
+            _metrics.http_requests_total.labels(
+                method=request.method, path=path, status=str(status)).inc()
+            _metrics.http_request_duration_seconds.labels(
+                method=request.method, path=path).observe(dur)
+        except Exception:
+            pass
+        _req_log.info("http_request", request_id=request_id, method=request.method,
+                      path=request.url.path, status=status, latency_ms=round(dur * 1000, 1))
+
+
 # ── P16: opt-in API-key + rate limiting (no-op unless configured) ─────────────
 _OPEN_PATHS = ("/health", "/metrics", "/docs", "/redoc", "/openapi.json")
 

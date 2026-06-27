@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Playfair_Display, Manrope, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import Navbar from '@/components/Navbar';
+import AuthGate from '@/components/AuthGate';
 
 // Readability pass: Playfair Display replaces Cormorant Garamond — same luxury
 // serif voice, but a far sturdier x-height and stroke contrast at screen sizes.
@@ -29,8 +30,8 @@ const mono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: 'AutoML Orchestrator',
-  description: 'Ten autonomous agents. One CSV. A production model — explained.',
-  icons: { icon: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2240%22 fill=%22%23c8a96e%22/></svg>' },
+  description: 'Upload a CSV, state your goal — ten agents build and explain a deployable model.',
+  icons: { icon: 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2250%22 cy=%2250%22 r=%2240%22 fill=%22%236366f1%22/></svg>' },
 };
 
 // Runs before paint — applies the saved theme so there is no flash of wrong theme.
@@ -62,7 +63,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="aurora" />
         </div>
         <Navbar />
-        <main>{children}</main>
+        <main>
+          <AuthGate>{children}</AuthGate>
+        </main>
       </body>
     </html>
   );

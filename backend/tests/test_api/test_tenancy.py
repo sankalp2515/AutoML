@@ -12,6 +12,7 @@ from app.models.run import Run
 
 
 def _enable_tenants(monkeypatch, mapping_json):
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
     monkeypatch.setattr(settings, "TENANT_API_KEYS", mapping_json)
     auth._key_map.cache_clear()
 

@@ -30,6 +30,97 @@ From the user's first live test pass.
 - **Production audit** `docs/PRODUCTION_AUDIT.md` — full severity/status table; top open items: real SECRET_KEY
   + secrets manager, move inference `eval` into the sandbox, add fallback LLM key, CI integration harness,
   dataset retention/encryption, Grafana creds.
+### Frontend UX overhaul + Supabase auth fix (2026-06-26)
+From user feedback (palette/naming/layout + auth not working). UNVERIFIED (no Next build locally).
+- **Auth fix (backend, VERIFIED):** Supabase JWT verification now supports BOTH legacy HS256 (shared
+  secret) AND new-project asymmetric RS256/ES256 via JWKS (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`).
+  `_supabase_enabled` true if SUPABASE_JWT_SECRET or SUPABASE_URL set. cryptography added. JWKS RS256 test
+  (mocked client) + conftest now isolates tests from dev .env (forces public mode). 170 tests pass.
+- **Palette:** re-themed via CSS-variable VALUES only (no class renames) — warm gold/cream "Obsidian Atelier"
+  → technical **slate surfaces + indigo accent** (emerald success, red error), dark + light. btn-gold text→white;
+  Navbar underline + favicon → indigo.
+- **Naming (de-luxury):** Commission→New Model, Gallery→Runs, "Atelier · ten agents"→"Automated ML pipeline",
+  "Commission a Model"→"Train a Model", "Begin the Work"→"Run Pipeline", "The Studio"→"Pipeline Type",
+  "i. The Dataset/ii. The Intention"→"1. Dataset/2. Goal", "The Process—Ten Hands"→"The Pipeline—10 Agents",
+  "Instruments"→"Dashboards", runs-page "Commissioned Works"→"Your Runs", ThemeToggle titles.
+- **Layout:** landing hero restructured to a **two-column grid** (headline left, upload card right) so the
+  primary action is ABOVE THE FOLD (was: scroll past a huge centered hero).
+- **Auth UX:** new `AuthGate` (redirects to /login when auth enabled + not signed in; no-op in public mode) wired
+  into layout; new `AuthMenu` (Navbar email + Sign out / Sign in link). @opentelemetry/api added (supabase optional dep).
+- **NEEDS LIVE VERIFY:** `npm install` + frontend rebuild; confirm it compiles (I can't run next build); login→redirect,
+  profile/logout, palette, layout. If tsc errors appear, they'll be small typing fixes.
+
+### Observability — 5-layer LLM-app coverage (2026-06-26)
+Audited against the standard 5 layers; closed the gaps:
+- **Layer 1 (request logging):** request-id middleware in main.py — assigns/propagates `X-Request-ID`,
+  binds it to a contextvar, logs every request (method/path/status/latency_ms/request_id), records
+  `http_requests_total` + `http_request_duration_seconds` (path normalized to avoid label-cardinality blowup).
+- **Layer 2 (prompt/context):** `llm.complete` logs `llm_request` with a **prompt_version** (sha256 of the
+  system prompt → changes when the template changes), system/user char counts + a 200-char preview;
+  agentic path logs `context_retrieved` (cookbook RAG chunks + provenance).
+- **Layer 4 (cache metrics):** `llm_cache_requests_total` + `llm_cache_hits_total` → hit-ratio. (first-token
+  latency = N/A, non-streaming; hallucination feedback = empirical validation, no user-feedback loop yet.)
+- **Layer 5 (correlation):** `request_id` threaded through `llm_request`/`llm_call` logs → a request is
+  traceable across API→orchestrator→sandbox→LLM. (Full OpenTelemetry exporter = documented follow-on.)
+- **Layer 3** was already strong (AgentStep, decision_logs, repair counters, sandbox timing).
+- `test_observability.py` (5 tests). **169 tests pass.**
+
+### DL-0 — PyTorch foundation (2026-06-26)
+Deep-learning integrated as registry entries, NOT a new graph (per docs/analysis/12).
+- **`sandbox/automl_dl/`** — sklearn-compatible PyTorch estimators `TorchMLPClassifier` /
+  `TorchMLPRegressor` (configurable MLP, GPU + AMP, internal val split + early stopping,
+  internal input/target standardization). Because inference also runs in the sandbox image,
+  the **existing joblib pipeline serializes/serves them with zero changes** — no state_dict path.
+  **Key simplification:** the training loop lives INSIDE the estimator, so it rides the existing
+  model_selector/tuner/evaluator templates — no separate DL training template.
+- **Verified locally on GPU** (`test_automl_dl.py`, 5 tests): fit/predict/proba, sklearn clone +
+  get_params, runs under `cross_val_score`, and the **joblib round-trip serves identically** (regressor
+  R²≈0.99 at 300 epochs — standardization works). torch 2.6.0+cu124, CUDA available on this box.
+- **Registry**: `TorchMLP` entry (`installed=False` until image baked; gpu=True) + `_TORCHMLP_SPACE`
+  (lr/dropout/weight_decay). Correctly excluded from the installed menu, shown in recommendations.
+- **Wiring**: model_selector template guarded-imports the estimators; sandbox `requirements.txt` adds
+  torch (CUDA index); Dockerfile copies `automl_dl` + sets PYTHONPATH; AST whitelist adds torch/automl_dl.
+- **164 tests pass.**
+- **NEEDS LIVE VERIFY (Docker/GPU):** rebuild sandbox image with torch (~2GB) → flip `installed=True` →
+  scout picks TorchMLP on a suitable dataset → trains on GPU → tuner tunes → deploy → predict (joblib).
+  Watch CV cost (MLP × k-folds on a 1660 Ti); early stopping mitigates. Next: DL-1 sequence models (TS), DL-2 LOB.
+
+### P1 complete — Ray + typed OpenAPI client (2026-06-26)
+- **Ray parallelism** (#1): `app/core/parallel.py` `parallel_map(fn, items)` — fans independent tasks
+  across Ray when `USE_RAY` is on, else sequential; degrades gracefully if Ray is missing/init fails
+  (never breaks a run). Wired into the research toolkit's model-variant training via a top-level
+  `_evaluate_variant` worker. **Verified end-to-end with real Ray installed locally** (3 variants trained
+  in parallel → winner + Sharpe). `test_parallel.py` (4 tests incl. real-Ray + fallback).
+- **Typed OpenAPI client** (contract-drift fix): generated `backend/openapi.json` from FastAPI (24 paths)
+  + `frontend/lib/api-schema.ts` (1576 lines) via openapi-typescript; added `npm run gen:api` + the
+  devDependency. **CI drift guard** (2 jobs in ci.yml): backend regenerates openapi.json and fails on diff
+  (route drift); frontend regenerates api-schema.ts and fails on diff (stale types). Schema+types verified in sync.
+  Follow-on (optional, needs `npm install` + tsc): migrate `lib/types.ts` consumers to the generated types.
+- **159 tests pass.** Projects #5 and #1 complete; AI-Engineer-lens + Tower platform pieces all landed.
+
+### P1 cont. — research toolkit (#5) + DVC (#1) (2026-06-25)
+- **Reproducible research toolkit** `app/research/toolkit.py` + CLI (`python -m app.research.toolkit run
+  --config params.yaml`): CSV + YAML → backward-looking TS features → N model variants → leakage-safe CV
+  (walk-forward or PurgedKFold) → temporal hold-out + transaction-cost backtest → JSON report. Self-contained,
+  reuses backtest.py + cv.py. `test_research_toolkit.py` (5 tests). Maps directly to Tier-1 #5.
+- **DVC** (#1 data lineage): `dvc.yaml` (research stage runs the toolkit), `params.yaml` (tracked params),
+  `.dvcignore`, `docs/DVC.md`; dvc+pyyaml added to requirements. `dvc repro` = reproducible runs;
+  `dvc push` ships data/outputs to a remote. (Scaffolded + YAML-validated; needs `dvc init` + a dataset to run live.)
+- **155 tests pass.** Remaining P1: Ray (parallel training) + typed OpenAPI client — steps documented; need user env to verify.
+
+### P1 — prev_score fix + purged/embargoed CV (2026-06-25)
+- **Bug fix:** `node_evaluator` now captures the prior iteration's score as `prev_score`
+  BEFORE the evaluator overwrites `current_score`. Previously prev_score was never set, so
+  the iteration gate always compared against 0 → "improvement" equalled the raw score and the
+  loop never converged (only the max-iteration cap stopped it). Now a flat score converges
+  after the 2nd evaluation. Integration harness updated + regression test added.
+- **Purged/embargoed K-fold** `app/core/cv.py` (`PurgedKFold` + `purged_kfold_indices`) —
+  López de Prado financial CV: contiguous time-ordered test folds, purge a window around each
+  test block, embargo bars immediately after (serial-correlation leakage). sklearn-style
+  splitter. `test_cv.py` (7 tests: disjoint, full coverage, contiguity, embargo, purge-gap, wrapper).
+  Follow-on: inline into the TS sandbox template as the finance-mode CV (needs live verify).
+- **150 tests pass.**
+
 ### Tower track — #5/#1 kickoff: quant backtest metrics (2026-06-25)
 Toward the "Reproducible Research Toolkit" (#5) + "Distributed ML Research Platform" (#1) extensions
 for quant-finance relevance (Tower Research). First verifiable slice landed:

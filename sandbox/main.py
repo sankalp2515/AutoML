@@ -26,7 +26,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 _IMPORT_WHITELIST = {
     "pandas", "numpy", "sklearn", "xgboost", "scipy", "joblib", "json", "math",
     "re", "datetime", "statistics", "collections", "itertools", "warnings",
-    "imblearn", "random", "functools",
+    "imblearn", "random", "functools", "torch", "automl_dl",
 }
 _BANNED_NAMES = {
     "eval", "exec", "compile", "open", "__import__", "input", "exit", "quit",

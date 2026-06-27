@@ -115,22 +115,54 @@ async def test_significance_gate_stops_iteration(monkeypatch):
     assert "exporter" in order
 
 
+class _IncreasingEvaluator:
+    """Evaluator stub whose score rises each call — so improvement stays above the
+    noise floor and the loop is bounded only by max_iterations."""
+    name = "evaluator"
+
+    def __init__(self, order, step=0.1):
+        self._order, self._score, self._step = order, 0.5, step
+
+    async def run(self, state):
+        self._order.append("evaluator")
+        self._score += self._step
+        return {"current_score": round(self._score, 3), "score_std": 0.0,
+                "evaluation_basis": "holdout"}
+
+
 @pytest.mark.asyncio
 async def test_iteration_loops_then_caps(monkeypatch):
     order = []
-    # Real improvement above the noise floor → it should iterate, but the
-    # max_iterations cap must terminate the loop (no infinite cycle).
-    _install(monkeypatch, order, overrides={
-        "_evaluator": {"current_score": 0.95, "score_std": 0.0, "evaluation_basis": "holdout"},
-    })
+    # Genuinely improving each round → iterate, but max_iterations must cap it.
+    _install(monkeypatch, order)
+    monkeypatch.setattr(orchestrator, "_evaluator", _IncreasingEvaluator(order))
     orchestrator._compiled_graph = None
     graph = orchestrator.get_graph()
 
     final = await graph.ainvoke(_initial_state())
 
-    assert order.count("feature_engineer") > 1          # it iterated
-    assert final.get("iteration", 0) <= final.get("max_iterations", 3) + 1  # but capped
-    assert "exporter" in order                           # and terminated cleanly
+    assert order.count("feature_engineer") > 1                       # it iterated
+    assert order.count("evaluator") == final.get("max_iterations", 3)  # capped at the limit
+    assert "exporter" in order                                        # and terminated cleanly
+
+
+@pytest.mark.asyncio
+async def test_flat_score_converges_after_second_eval(monkeypatch):
+    order = []
+    # Score doesn't change between iterations → improvement is 0 once prev_score is
+    # tracked, so it must STOP after the 2nd evaluation. (Regression test for the
+    # prev_score bug, where improvement always equalled the raw score and never converged.)
+    _install(monkeypatch, order, overrides={
+        "_evaluator": {"current_score": 0.80, "score_std": 0.0, "evaluation_basis": "holdout"},
+    })
+    orchestrator._compiled_graph = None
+    graph = orchestrator.get_graph()
+
+    await graph.ainvoke(_initial_state())
+
+    assert order.count("evaluator") == 2          # first pass iterates, second converges
+    assert order.count("feature_engineer") == 2   # initial pass + one iteration, then stop
+    assert "exporter" in order
 
 
 @pytest.fixture(autouse=True)

@@ -1,0 +1,15 @@
+# DVC pipeline (Tower track — #1 data lineage / reproducibility).
+# `dvc repro` re-runs this stage whenever the data, code, or params change, and
+# records exact hashes so any experiment is reproducible. `dvc push` ships the
+# data + outputs to a configured remote (S3/GCS/etc).
+stages:
+  research:
+    cmd: cd backend && python -m app.research.toolkit run --config ../params.yaml
+    deps:
+      - backend/app/research/toolkit.py
+      - backend/app/core/backtest.py
+      - backend/app/core/cv.py
+      - data/prices.csv
+      - params.yaml
+    outs:
+      - out/report.json

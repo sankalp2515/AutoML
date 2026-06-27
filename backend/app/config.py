@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     # LLM cost/quality controls (AI-engineering hardening).
     LLM_CACHE_ENABLED: bool = False        # cache identical (system,user,model,temp) completions
     LLM_CACHE_TTL_S: int = 3600
+    USE_RAY: bool = False                  # parallelize independent training tasks via Ray
     TENANT_BUDGET_USD: float = 0.0         # cumulative LLM-cost cap per tenant (0 = unlimited)
     INJECTION_GUARD_STRICT: bool = False   # reject goals with detected prompt-injection (else log+strip)
 
@@ -63,6 +64,10 @@ class Settings(BaseSettings):
     # cross-tenant access is denied. Per-tenant cap on concurrently active runs
     # (0 = unlimited). USE_JOB_QUEUE routes runs through a durable arq worker
     # instead of an in-process background task (survives API restarts).
+    # Master switch for ALL auth/tenant enforcement. Default OFF so the app runs
+    # open by default — having Supabase keys in .env (needed by the frontend) does
+    # NOT turn on the backend auth wall. Set AUTH_ENABLED=true to require auth.
+    AUTH_ENABLED: bool = False
     TENANT_API_KEYS: str = ""
     QUOTA_MAX_ACTIVE_RUNS_PER_TENANT: int = 0
     USE_JOB_QUEUE: bool = False

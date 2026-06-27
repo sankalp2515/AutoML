@@ -220,14 +220,28 @@ class LLMClient:
         max_tokens: int = 4096,
     ) -> str:
         last_error: Exception | None = None
+        from app.core import metrics
+
+        # Prompt & context logging (Layer 2): the prompt VERSION is a hash of the
+        # system prompt — it changes whenever the template changes, so degradations
+        # can be traced to a prompt edit. We log sizes + a short preview (profiles,
+        # not raw rows) rather than the full prompt.
+        prompt_version = hashlib.sha256(system.encode()).hexdigest()[:8]
+        _log.info("llm_request", request_id=context.get_request_id(),
+                  run_id=context.get_run_id(), agent=context.get_agent_name(),
+                  prompt_version=prompt_version, system_chars=len(system),
+                  user_chars=len(user), user_preview=user[:200], temperature=temperature)
 
         # Cache: identical prompt → stored completion (opt-in, saves tokens/latency).
         cache_model = self.chain[0].model if self.chain else self.model
         ckey = _cache_key(cache_model, system, user, temperature)
         if settings.LLM_CACHE_ENABLED:
+            metrics.llm_cache_requests_total.inc()
             cached = _cache_get(ckey)
             if cached is not None:
-                _log.info("llm_cache_hit", agent=context.get_agent_name())
+                metrics.llm_cache_hits_total.inc()
+                _log.info("llm_cache_hit", agent=context.get_agent_name(),
+                          request_id=context.get_request_id(), prompt_version=prompt_version)
                 return cached
 
         # Outer loop runs at most twice: the 2nd pass only happens if EVERY provider
@@ -357,9 +371,10 @@ class LLMClient:
         if cost > 0:
             metrics.llm_cost_usd_total.labels(agent_name=agent).inc(cost)
 
-        # One structured trace line per LLM call (run_id correlates a full pipeline
-        # trace; ready to ship to OTel/LangSmith via the log pipeline).
-        _log.info("llm_call", run_id=run_id, agent=agent, provider=provider, model=model,
+        # One structured trace line per LLM call. request_id correlates it to the
+        # originating HTTP request (Layer 5); run_id correlates the pipeline trace.
+        _log.info("llm_call", request_id=context.get_request_id(), run_id=run_id,
+                  agent=agent, provider=provider, model=model,
                   prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                   latency_ms=round(latency_s * 1000, 1), cost_usd=round(cost, 6))
 

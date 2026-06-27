@@ -13,6 +13,8 @@ import type {
   Notebook,
 } from './types';
 
+import { getAccessToken } from './supabase';
+
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -23,12 +25,16 @@ export const WS_BASE = API_BASE.replace('http://', 'ws://').replace(
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   // Attach the Supabase access token when signed in (no-op if auth disabled).
-  const { getAccessToken } = await import('./supabase');
   const token = await getAccessToken();
-  const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
+  const headers = new Headers(init?.headers);
+  headers.set('Accept', 'application/json');
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Accept: 'application/json', ...authHeader, ...init?.headers },
     ...init,
+    headers,
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;

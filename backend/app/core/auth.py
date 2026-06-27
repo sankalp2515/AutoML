@@ -38,25 +38,51 @@ def _key_map() -> dict[str, str]:
         return {}
 
 
+_jwks_clients: dict = {}   # url → cached PyJWKClient (fetches + caches public keys)
+
+
 def _supabase_enabled() -> bool:
-    return bool(settings.SUPABASE_JWT_SECRET)
+    # Legacy projects: shared HS256 secret. New projects: asymmetric keys via JWKS
+    # (only SUPABASE_URL needed). Either signal turns Supabase auth on.
+    return bool(settings.SUPABASE_JWT_SECRET) or bool(settings.SUPABASE_URL)
 
 
 def tenant_mode_enabled() -> bool:
+    # Auth is OFF unless explicitly enabled — so Supabase/API keys sitting in .env
+    # never accidentally produce a 401. When AUTH_ENABLED is false the whole system
+    # runs in public mode and no endpoint ever requires a token.
+    if not settings.AUTH_ENABLED:
+        return False
     return bool(_key_map()) or _supabase_enabled()
 
 
 def _verify_supabase_jwt(token: str) -> str | None:
-    """Verify a Supabase access token (HS256 with the project JWT secret) and
-    return the user id (`sub`), or None if invalid/expired."""
+    """Verify a Supabase access token and return the user id (`sub`), or None.
+
+    Supports BOTH signing schemes: HS256 (legacy shared JWT secret) and the newer
+    asymmetric RS256/ES256 keys, verified against the project's JWKS endpoint.
+    """
     if not token or not _supabase_enabled():
         return None
     try:
         import jwt  # PyJWT
-        claims = jwt.decode(
-            token, settings.SUPABASE_JWT_SECRET, algorithms=["HS256"],
-            audience=settings.SUPABASE_JWT_AUD,
-        )
+        alg = jwt.get_unverified_header(token).get("alg", "HS256")
+
+        if alg == "HS256" and settings.SUPABASE_JWT_SECRET:
+            claims = jwt.decode(token, settings.SUPABASE_JWT_SECRET, algorithms=["HS256"],
+                                audience=settings.SUPABASE_JWT_AUD)
+        elif alg in ("RS256", "ES256") and settings.SUPABASE_URL:
+            jwks_url = settings.SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json"
+            client = _jwks_clients.get(jwks_url)
+            if client is None:
+                client = jwt.PyJWKClient(jwks_url)
+                _jwks_clients[jwks_url] = client
+            signing_key = client.get_signing_key_from_jwt(token)
+            claims = jwt.decode(token, signing_key.key, algorithms=[alg],
+                                audience=settings.SUPABASE_JWT_AUD)
+        else:
+            return None
+
         sub = claims.get("sub")
         return str(sub) if sub else None
     except Exception:

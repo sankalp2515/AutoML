@@ -85,6 +85,22 @@ llm_latency_seconds = _histogram(
 llm_cost_usd_total = _counter(
     "automl_llm_cost_usd_total", "Estimated LLM cost in USD", ["agent_name"]
 )
+# Cache observability (Layer 4): ratio = hits / requests.
+llm_cache_requests_total = _counter(
+    "automl_llm_cache_requests_total", "LLM completions eligible for caching"
+)
+llm_cache_hits_total = _counter(
+    "automl_llm_cache_hits_total", "LLM completions served from cache"
+)
+
+# ── HTTP request-level (Layer 1) ──────────────────────────────────────────────
+http_requests_total = _counter(
+    "automl_http_requests_total", "HTTP requests", ["method", "path", "status"]
+)
+http_request_duration_seconds = _histogram(
+    "automl_http_request_duration_seconds", "HTTP request latency", ["method", "path"],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+)
 
 # ── Sandbox-level ─────────────────────────────────────────────────────────────
 sandbox_executions_total = _counter(

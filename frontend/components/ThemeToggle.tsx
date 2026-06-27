@@ -26,7 +26,7 @@ export default function ThemeToggle() {
     <button
       onClick={toggle}
       aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-      title={theme === 'dark' ? 'Ivory Atelier (light)' : 'Obsidian Atelier (dark)'}
+      title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
       className="relative w-12 h-6 rounded-full border hairline-gold transition-colors duration-300 flex-shrink-0"
       style={{ background: 'rgb(var(--obsidian-800))' }}
     >

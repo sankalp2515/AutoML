@@ -25,6 +25,11 @@ _agent_name: contextvars.ContextVar[str] = contextvars.ContextVar(
 _agent_start: contextvars.ContextVar[float] = contextvars.ContextVar(
     "automl_agent_start", default=0.0
 )
+# Per-HTTP-request id (Layer 1) — also the correlation/trace id threaded through
+# logs across components (Layer 5). Set by the request-id middleware.
+_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "automl_request_id", default=None
+)
 
 
 def set_agent_context(run_id: str, agent_name: str, start_time: float) -> None:
@@ -32,6 +37,14 @@ def set_agent_context(run_id: str, agent_name: str, start_time: float) -> None:
     _run_id.set(run_id)
     _agent_name.set(agent_name)
     _agent_start.set(start_time)
+
+
+def set_request_id(request_id: str) -> None:
+    _request_id.set(request_id)
+
+
+def get_request_id() -> str | None:
+    return _request_id.get()
 
 
 def get_run_id() -> str | None:

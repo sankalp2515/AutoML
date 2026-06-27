@@ -10,83 +10,87 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── DARK (default) ── */
-  --obsidian-950: 10 9 8;
-  --obsidian-900: 14 13 11;
-  --obsidian-850: 19 17 14;
-  --obsidian-800: 25 22 19;
-  --obsidian-700: 36 31 26;
-  --obsidian-600: 51 44 36;
+  /* ── DARK (default) — technical slate surfaces + indigo accent ──
+     NOTE: the accent variables keep the historical name "gold" to avoid renaming
+     class vocabulary everywhere; their VALUES are now indigo. */
+  --obsidian-950: 15 18 25;
+  --obsidian-900: 22 27 37;
+  --obsidian-850: 27 33 45;
+  --obsidian-800: 33 41 54;
+  --obsidian-700: 48 58 74;
+  --obsidian-600: 71 85 105;
 
-  /* readability pass: brighter steps than v1 */
-  --bone: 238 233 222;
-  --bone-dim: 193 186 172;
-  --bone-faint: 153 146 131;
-  --bone-ghost: 110 104 92;
+  --bone: 226 232 240;
+  --bone-dim: 168 180 198;
+  --bone-faint: 122 134 154;
+  --bone-ghost: 88 99 118;
 
-  --gold-200: 240 222 182;
-  --gold-300: 227 201 143;
-  --gold-400: 212 182 124;
-  --gold-500: 200 169 110;
-  --gold-600: 164 133 78;
-  --gold-700: 125 101 57;
-  --gold-900: 58 47 29;
+  /* accent — indigo */
+  --gold-200: 199 210 254;
+  --gold-300: 165 180 252;
+  --gold-400: 129 140 248;
+  --gold-500: 99 102 241;
+  --gold-600: 79 70 229;
+  --gold-700: 67 56 202;
+  --gold-900: 30 27 75;
 
-  --jade-300: 143 208 192;
-  --jade-400: 116 195 178;
-  --jade-500: 95 179 161;
-  --jade-600: 71 144 127;
-  --jade-900: 29 56 51;
+  /* success — emerald */
+  --jade-300: 110 231 183;
+  --jade-400: 52 211 153;
+  --jade-500: 16 185 129;
+  --jade-600: 5 150 105;
+  --jade-900: 6 78 59;
 
-  --terra-300: 217 162 152;
-  --terra-400: 196 117 107;
-  --terra-500: 168 93 83;
-  --terra-900: 61 33 29;
+  /* error — red */
+  --terra-300: 252 165 165;
+  --terra-400: 248 113 113;
+  --terra-500: 239 68 68;
+  --terra-900: 69 10 10;
 
-  --grain-opacity: 0.035;
-  --grid-line: 238 233 222;
-  --grid-opacity: 0.025;
+  --grain-opacity: 0.02;
+  --grid-line: 226 232 240;
+  --grid-opacity: 0.02;
 
   color-scheme: dark;
 }
 
-/* ── LIGHT — "Ivory Atelier": warm paper, ink text, deepened accents ── */
+/* ── LIGHT — clean slate on white, indigo accent ── */
 html.light {
-  --obsidian-950: 247 244 237;   /* paper */
-  --obsidian-900: 252 250 245;   /* card surface */
-  --obsidian-850: 244 240 231;
-  --obsidian-800: 237 232 221;
-  --obsidian-700: 226 219 205;
-  --obsidian-600: 209 200 183;
+  --obsidian-950: 248 250 252;   /* page */
+  --obsidian-900: 255 255 255;   /* card surface */
+  --obsidian-850: 241 245 249;
+  --obsidian-800: 226 232 240;
+  --obsidian-700: 203 213 225;
+  --obsidian-600: 148 163 184;
 
-  --bone: 32 28 22;              /* ink */
-  --bone-dim: 79 72 61;
-  --bone-faint: 122 114 99;
-  --bone-ghost: 164 156 140;
+  --bone: 15 23 42;              /* slate-900 ink */
+  --bone-dim: 51 65 85;
+  --bone-faint: 100 116 139;
+  --bone-ghost: 148 163 184;
 
-  /* gold deepened so it reads on paper */
-  --gold-200: 122 95 47;
-  --gold-300: 138 109 58;
-  --gold-400: 153 122 66;
-  --gold-500: 166 134 74;
-  --gold-600: 186 156 100;
-  --gold-700: 205 180 132;
-  --gold-900: 235 222 196;
+  /* indigo, deepened for contrast on white */
+  --gold-200: 67 56 202;
+  --gold-300: 79 70 229;
+  --gold-400: 99 102 241;
+  --gold-500: 99 102 241;
+  --gold-600: 129 140 248;
+  --gold-700: 165 180 252;
+  --gold-900: 224 231 255;
 
-  --jade-300: 31 110 94;
-  --jade-400: 39 126 108;
-  --jade-500: 47 141 121;
-  --jade-600: 78 168 149;
-  --jade-900: 214 235 229;
+  --jade-300: 5 150 105;
+  --jade-400: 16 185 129;
+  --jade-500: 16 185 129;
+  --jade-600: 52 211 153;
+  --jade-900: 209 250 229;
 
-  --terra-300: 150 70 58;
-  --terra-400: 168 85 72;
-  --terra-500: 186 105 92;
-  --terra-900: 243 224 219;
+  --terra-300: 220 38 38;
+  --terra-400: 239 68 68;
+  --terra-500: 248 113 113;
+  --terra-900: 254 226 226;
 
-  --grain-opacity: 0.05;
-  --grid-line: 32 28 22;
-  --grid-opacity: 0.035;
+  --grain-opacity: 0.03;
+  --grid-line: 15 23 42;
+  --grid-opacity: 0.03;
 
   color-scheme: light;
 }
@@ -227,10 +231,10 @@ html.light {
 
   .btn-gold {
     @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gold-500 px-6 py-3 font-sans text-sm font-semibold transition-all duration-300;
-    color: rgb(var(--obsidian-950));
+    color: rgb(255 255 255);   /* white text on the indigo accent */
   }
   html.light .btn-gold {
-    color: rgb(252 250 245);
+    color: rgb(255 255 255);
   }
   .btn-gold:hover:not(:disabled) {
     @apply bg-gold-400;

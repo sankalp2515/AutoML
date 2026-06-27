@@ -11,6 +11,14 @@ os.environ.setdefault("DATA_DIR", "/tmp/automl_test")
 os.environ.setdefault("LLM_PROVIDER", "groq")
 os.environ.setdefault("GROQ_API_KEY", "test_key_for_unit_tests")
 
+# Isolate tests from the developer's .env: force PUBLIC (no-auth) mode so endpoint
+# tests are deterministic regardless of whether Supabase/tenant keys are configured
+# locally. Explicit assignment (not setdefault) overrides any value from .env.
+os.environ["TENANT_API_KEYS"] = ""
+os.environ["SUPABASE_JWT_SECRET"] = ""
+os.environ["SUPABASE_URL"] = ""
+os.environ["API_KEY"] = ""
+
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

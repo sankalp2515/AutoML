@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import ThemeToggle from '@/components/ThemeToggle';
+import AuthMenu from '@/components/AuthMenu';
 
 export default function Navbar() {
   const path = usePathname();
@@ -19,7 +20,7 @@ export default function Navbar() {
               AutoML <em className="text-gold-400 not-italic font-semibold">Orchestrator</em>
             </span>
             <span className="block font-mono text-[11px] uppercase tracking-luxe text-bone-faint mt-0.5">
-              Atelier · ten agents
+              Automated ML pipeline
             </span>
           </div>
         </Link>
@@ -27,16 +28,17 @@ export default function Navbar() {
         {/* Navigation */}
         <div className="flex items-center gap-2">
           <NavLink href="/" active={path === '/'}>
-            Commission
+            New Model
           </NavLink>
           <NavLink href="/runs" active={path === '/runs' || path.startsWith('/runs/')}>
-            Gallery
+            Runs
           </NavLink>
           <div className="w-px h-5 bg-bone/10 mx-2" />
           <ExtLink href="http://localhost:5000">MLflow</ExtLink>
           <ExtLink href="http://localhost:3001">Grafana</ExtLink>
           <div className="w-px h-5 bg-bone/10 mx-2" />
           <ThemeToggle />
+          <AuthMenu />
         </div>
       </div>
     </nav>
@@ -64,7 +66,7 @@ function NavLink({
         className={`absolute left-4 right-4 -bottom-[1px] h-px transition-opacity duration-300 ${
           active ? 'opacity-100' : 'opacity-0'
         }`}
-        style={{ background: 'linear-gradient(90deg, transparent, #c8a96e, transparent)' }}
+        style={{ background: 'linear-gradient(90deg, transparent, rgb(var(--gold-500)), transparent)' }}
       />
     </Link>
   );
